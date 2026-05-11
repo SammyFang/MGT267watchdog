@@ -5,6 +5,11 @@ on:
     # Edit this cron to change the GitHub-hosted crawl interval.
     - cron: "11 * * * *"
   workflow_dispatch:
+    inputs:
+      chain:
+        description: "Continue hourly self-dispatch loop"
+        required: false
+        default: "true"
   push:
     branches:
       - main
@@ -17,12 +22,17 @@ on:
 
 permissions:
   contents: read
+  actions: write
+
+concurrency:
+  group: supply-chain-hourly
+  cancel-in-progress: true
 
 jobs:
   monitor:
     if: github.event_name != 'push' || contains(github.event.head_commit.message, '[hourly-now]')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 75
 
     steps:
       - name: Check out repository
@@ -72,3 +82,11 @@ jobs:
           name: monitor-output
           path: .monitor-state
           if-no-files-found: ignore
+
+      - name: Queue next hourly run
+        if: success() && (github.event_name != 'workflow_dispatch' || github.event.inputs.chain != 'false')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 3600
+          gh workflow run monitor.yml --ref main -f chain=true

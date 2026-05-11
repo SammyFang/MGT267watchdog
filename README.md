@@ -33,6 +33,7 @@ GitHub Actions schedules:
 
 GitHub requires cron schedules to live in workflow files, so edit those lines if the cloud schedule needs to change.
 The minutes intentionally avoid exact hour and quarter-hour boundaries because GitHub scheduled workflows can be delayed or dropped during high-load times.
+Each production workflow also self-dispatches the next run after it sends mail, so the loop does not depend only on GitHub cron delivery. Push with `[hourly-now]` or `[warning-now]` starts the corresponding loop immediately.
 
 ## Standing Gap Formula
 
