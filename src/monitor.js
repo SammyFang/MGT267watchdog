@@ -976,10 +976,11 @@ function geminiApiKey(config) {
 
 function buildRecommendationPrompt(config, record, standingReport, options = {}) {
   const metricAlerts = options.metricAlerts || [];
+  const language = config.ai?.recommendation_language || "Traditional Chinese";
   const lines = [
     "You are advising a team in a supply chain simulation.",
     "Use only the data below. Do not invent missing values.",
-    "Write Traditional Chinese. Return 2 to 4 concise action recommendations.",
+    `Write ${language}. Return 2 to 4 concise action recommendations.`,
     "Each recommendation should be one short sentence, useful for operations decisions, and avoid formulas.",
     "Return JSON only in this shape: {\"recommendations\":[\"...\"]}",
     "",
