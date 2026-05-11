@@ -11,7 +11,10 @@ Most settings are in `monitor_config.json`:
 - `monitor.warehouse_inventory_threshold`: inventory alert threshold, currently `450`.
 - `monitor.warning_minutes`: warning email interval label, currently `15`.
 - `monitor.send_report_every_run`: send one email each scheduled run.
+- `monitor.metric_thresholds`: optional min/max alert thresholds for the hourly report's warehouse, factory, and headquarters metrics.
+- `ai.enabled`, `ai.model`, `ai.api_key_env`: Gemini recommendation settings.
 - `email.recipients`: notification recipient list.
+- `email.footer`: email footer text and URL.
 - `crawl.plot_sources`: warehouse, factory, and headquarters plot URLs included in hourly reports.
 
 Configured recipients:
@@ -75,6 +78,37 @@ SMTP_USER=your-email@gmail.com
 SMTP_PASSWORD=your-app-password
 SMTP_FROM=your-email@gmail.com
 ```
+
+## Optional AI Secret
+
+Gemini is optional but recommended for action notes in the email. Create a Gemini API key in Google AI Studio, then add it to GitHub as:
+
+```text
+Name: GEMINI_API_KEY
+Value: your Gemini API key
+```
+
+GitHub path: `Settings -> Secrets and variables -> Actions -> New repository secret`.
+
+## Editable Alert Thresholds
+
+The 15-minute warning email threshold is:
+
+```json
+"warehouse_inventory_threshold": 450
+```
+
+Other hourly report alert thresholds are in `monitor.metric_thresholds`. Set `min` or `max` to a number; leave unused thresholds as `null`.
+
+Available metric keys:
+
+- `warehouse_inventory:mail`
+- `warehouse_inventory:truck`
+- `warehouse_shipments:Calopeia`
+- `factory_wip:Calopeia`
+- `hq_demand:Calopeia`
+- `hq_lost_demand:Calopeia`
+- `hq_cash_balance:value`
 
 ## Run Locally
 

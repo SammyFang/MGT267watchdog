@@ -756,6 +756,315 @@ function buildOperationalLines(snapshot) {
   return lines;
 }
 
+function findOperationalMetric(snapshot, key) {
+  if (!snapshot) {
+    return null;
+  }
+
+  for (const section of snapshot.sections) {
+    for (const plot of section.plots) {
+      const found = plot.series.find((series) => series.key === key);
+
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+function buildMetricAlertLines(alerts = []) {
+  if (alerts.length === 0) {
+    return [];
+  }
+
+  return [
+    "",
+    "[Metric Alerts]",
+    ...alerts.map((alert) =>
+      [
+        alert.label,
+        `current ${alert.currentRaw}`,
+        `${alert.direction} ${alert.threshold}`,
+      ].join(" | "),
+    ),
+  ];
+}
+
+function collectMetricAlerts(config, snapshot) {
+  if (!snapshot) {
+    return [];
+  }
+
+  const thresholdConfig = config.monitor.metric_thresholds || {};
+  const alerts = [];
+
+  for (const [key, threshold] of Object.entries(thresholdConfig)) {
+    if (!threshold || typeof threshold !== "object") {
+      continue;
+    }
+
+    const metric = findOperationalMetric(snapshot, key);
+
+    if (!metric || !Number.isFinite(metric.valueNumber)) {
+      continue;
+    }
+
+    const min =
+      threshold.min === null || threshold.min === undefined
+        ? null
+        : Number(threshold.min);
+    const max =
+      threshold.max === null || threshold.max === undefined
+        ? null
+        : Number(threshold.max);
+    const label =
+      threshold.label ||
+      `${metric.section} ${metric.plot} ${metric.series}`.replace(/\s+/g, " ");
+
+    if (Number.isFinite(max) && metric.valueNumber >= max) {
+      alerts.push({
+        key,
+        label,
+        currentRaw: metric.valueRaw,
+        threshold: max,
+        direction: ">= max",
+      });
+    }
+
+    if (Number.isFinite(min) && metric.valueNumber <= min) {
+      alerts.push({
+        key,
+        label,
+        currentRaw: metric.valueRaw,
+        threshold: min,
+        direction: "<= min",
+      });
+    }
+  }
+
+  return alerts;
+}
+
+function metricSummaryLines(snapshot, limit = 12) {
+  if (!snapshot) {
+    return [];
+  }
+
+  const lines = [];
+
+  for (const section of snapshot.sections) {
+    for (const plot of section.plots) {
+      for (const series of plot.series) {
+        lines.push(
+          [
+            `${series.key}`,
+            `${section.name}/${plot.label}/${series.series}`,
+            `day=${series.dayRaw}`,
+            `value=${series.valueRaw}`,
+            `delta_1h=${series.deltaText || "n/a"}`,
+            `pct_1h=${series.changePercentText || "n/a"}`,
+          ].join(" | "),
+        );
+
+        if (lines.length >= limit) {
+          return lines;
+        }
+      }
+    }
+  }
+
+  return lines;
+}
+
+function standingSummaryLines(standingReport, limit = 8) {
+  return standingReport.rows.slice(0, limit).map((row) =>
+    [
+      `rank=${row.rank}`,
+      `team=${row.team}`,
+      `cash=${row.cash}`,
+      `gap=${row.gapAmountText}`,
+      `gap_pct=${row.gapPercentText}`,
+    ].join(" | "),
+  );
+}
+
+function buildFallbackRecommendations(config, record, standingReport, options = {}) {
+  const suggestions = [];
+  const snapshot = options.operationalSnapshot;
+  const lostDemand = findOperationalMetric(snapshot, "hq_lost_demand:Calopeia");
+  const demand = findOperationalMetric(snapshot, "hq_demand:Calopeia");
+  const wip = findOperationalMetric(snapshot, "factory_wip:Calopeia");
+  const shipments = findOperationalMetric(snapshot, "warehouse_shipments:Calopeia");
+
+  if (record.inventoryAlert) {
+    suggestions.push(
+      `倉庫庫存 ${record.warehouseInventory} 已達 ${record.threshold} 預警值；若需求支撐，優先降低入庫或加快出貨。`,
+    );
+  } else if (record.warehouseInventory <= 0 && lostDemand?.valueNumber > 0) {
+    suggestions.push(
+      `倉庫庫存為 ${record.warehouseInventory} 且 lost demand 為 ${lostDemand.valueRaw}；優先恢復補貨與可出貨量。`,
+    );
+  } else {
+    suggestions.push(
+      `倉庫庫存 ${record.warehouseInventory} 低於 ${record.threshold} 預警值；維持生產與出貨貼近需求。`,
+    );
+  }
+
+  if (lostDemand?.valueNumber > 0) {
+    suggestions.push(
+      `Lost demand 為 ${lostDemand.valueRaw}；檢查瓶頸在倉庫庫存、出貨時點或工廠產出。`,
+    );
+  }
+
+  if (wip?.valueNumber > 0 && shipments?.valueNumber === 0) {
+    suggestions.push(
+      `Factory WIP 為 ${wip.valueRaw} 且 shipments 為 ${shipments.valueRaw}；增加 WIP 前先檢查出貨流程。`,
+    );
+  }
+
+  if (standingReport.target.rank === 1) {
+    suggestions.push(
+      `現金排名第 1、金額 ${record.targetCash}；保護領先時避免過量庫存成本與需求流失。`,
+    );
+  } else {
+    suggestions.push(
+      `現金排名第 ${standingReport.target.rank}；採取高成本追趕動作前先比對排名差距表。`,
+    );
+  }
+
+  return suggestions.slice(0, Number(config.ai?.max_suggestions || 4));
+}
+
+function extractRecommendationItems(text, limit) {
+  const cleaned = String(text || "")
+    .replace(/```(?:json)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    const items = Array.isArray(parsed) ? parsed : parsed.recommendations;
+
+    if (Array.isArray(items)) {
+      return items
+        .map((item) => String(item).trim())
+        .filter(Boolean)
+        .slice(0, limit);
+    }
+  } catch {
+    // Fall through to line parsing when the model returns plain text.
+  }
+
+  return cleaned
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*[-*•\d.)]+\s*/, "").trim())
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function geminiApiKey(config) {
+  const configuredEnv = config.ai?.api_key_env || "GEMINI_API_KEY";
+
+  return (
+    optionalEnv("GOOGLE_API_KEY") ||
+    optionalEnv(configuredEnv) ||
+    optionalEnv("GEMINI_API_KEY")
+  );
+}
+
+function buildRecommendationPrompt(config, record, standingReport, options = {}) {
+  const metricAlerts = options.metricAlerts || [];
+  const lines = [
+    "You are advising a team in a supply chain simulation.",
+    "Use only the data below. Do not invent missing values.",
+    "Write Traditional Chinese. Return 2 to 4 concise action recommendations.",
+    "Each recommendation should be one short sentence, useful for operations decisions, and avoid formulas.",
+    "Return JSON only in this shape: {\"recommendations\":[\"...\"]}",
+    "",
+    `Target team: ${record.targetTeam}`,
+    `Checked at: ${record.checkedAtLocal} ${config.crawl.timezone}`,
+    `Cash: ${record.targetCash}`,
+    `Rank: ${record.targetRank}`,
+    `Dashboard day: ${record.dashboardDay}`,
+    `Warehouse inventory: ${record.warehouseInventory}`,
+    `Warehouse inventory day: ${record.warehouseDay}`,
+    `Warehouse inventory alert threshold: ${record.threshold}`,
+    `Warehouse inventory alert: ${record.inventoryAlert ? "yes" : "no"}`,
+    "",
+    "Standing rows:",
+    ...standingSummaryLines(standingReport),
+  ];
+
+  if (options.operationalSnapshot) {
+    lines.push("", "Operational metrics:", ...metricSummaryLines(options.operationalSnapshot));
+  }
+
+  if (metricAlerts.length > 0) {
+    lines.push(
+      "",
+      "Configured metric alerts:",
+      ...metricAlerts.map(
+        (alert) =>
+          `${alert.label}: current=${alert.currentRaw}, rule=${alert.direction} ${alert.threshold}`,
+      ),
+    );
+  }
+
+  return lines.join("\n");
+}
+
+async function buildRecommendations(config, record, standingReport, options = {}) {
+  const limit = Number(config.ai?.max_suggestions || 4);
+  const fallback = buildFallbackRecommendations(config, record, standingReport, options);
+
+  if (!config.ai?.enabled) {
+    return {
+      source: "Local rules",
+      items: fallback,
+    };
+  }
+
+  const apiKey = geminiApiKey(config);
+
+  if (!apiKey) {
+    console.warn("Gemini recommendations skipped: GEMINI_API_KEY is not set");
+    return {
+      source: "Local rules",
+      items: fallback,
+    };
+  }
+
+  try {
+    const { GoogleGenAI } = await import("@google/genai");
+    const model = config.ai.model || "gemini-2.5-flash";
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model,
+      contents: buildRecommendationPrompt(config, record, standingReport, options),
+    });
+    const responseText =
+      typeof response.text === "function" ? response.text() : response.text;
+    const items = extractRecommendationItems(responseText, limit);
+
+    if (items.length === 0) {
+      throw new Error("Gemini returned no recommendation items");
+    }
+
+    return {
+      source: `Gemini ${model}`,
+      items,
+    };
+  } catch (error) {
+    console.warn(`Gemini recommendations failed: ${error.message}`);
+    return {
+      source: "Local rules",
+      items: fallback,
+    };
+  }
+}
+
 function buildEmailSubject(config, record, options = {}) {
   const testPrefix = options.test ? "[TEST] " : "";
   const alertPrefix = record.inventoryAlert ? "ALERT " : "";
@@ -786,6 +1095,11 @@ function buildReportText(config, record, standingReport, options = {}) {
     `Warehouse inventory day: ${record.warehouseDay}`,
     `Warehouse threshold: ${record.threshold}`,
     `Inventory alert: ${record.inventoryAlert ? "YES" : "no"}`,
+    "",
+    "Recommendations",
+    ...((options.recommendations?.items || []).map((item) => `- ${item}`)),
+    `Source: ${options.recommendations?.source || "n/a"}`,
+    ...buildMetricAlertLines(options.metricAlerts),
     ...buildOperationalLines(options.operationalSnapshot),
     "",
     "Rank | Team | Cash | Gap amount | Gap percent",
@@ -893,6 +1207,73 @@ function buildOperationalSnapshotHtml(snapshot) {
   ].join("");
 }
 
+function buildRecommendationsHtml(recommendations) {
+  const items = recommendations?.items || [];
+
+  if (items.length === 0) {
+    return "";
+  }
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Action Notes</div>',
+    '<div style="border:1px solid #bfdbfe;border-radius:8px;background:#eff6ff;padding:12px 14px;">',
+    '<ol style="margin:0;padding-left:20px;color:#0f172a;font-size:14px;line-height:1.55;">',
+    ...items.map((item) => `<li style="margin:4px 0;">${escapeHtml(item)}</li>`),
+    "</ol>",
+    `<div style="font-size:11px;color:#64748b;margin-top:8px;">Source: ${escapeHtml(recommendations.source || "n/a")}</div>`,
+    "</div>",
+    "</div>",
+  ].join("");
+}
+
+function buildMetricAlertsHtml(alerts = []) {
+  if (alerts.length === 0) {
+    return "";
+  }
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Configured Alerts</div>',
+    '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #fecaca;border-radius:8px;overflow:hidden;font-size:13px;">',
+    '<thead><tr style="background:#fee2e2;color:#7f1d1d;">',
+    '<th style="padding:9px;text-align:left;">Metric</th>',
+    '<th style="padding:9px;text-align:right;">Current</th>',
+    '<th style="padding:9px;text-align:right;">Rule</th>',
+    "</tr></thead>",
+    "<tbody>",
+    ...alerts.map((alert) =>
+      [
+        "<tr>",
+        `<td style="padding:8px;border-bottom:1px solid #fecaca;font-weight:700;">${escapeHtml(alert.label)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #fecaca;text-align:right;">${escapeHtml(alert.currentRaw)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #fecaca;text-align:right;color:#b91c1c;font-weight:700;">${escapeHtml(`${alert.direction} ${alert.threshold}`)}</td>`,
+        "</tr>",
+      ].join(""),
+    ),
+    "</tbody>",
+    "</table>",
+    "</div>",
+  ].join("");
+}
+
+function buildEmailFooterHtml(config) {
+  const footer = config.email.footer || {};
+  const text = footer.text || "Developed by Yung-Sian Fang";
+  const url = footer.url || "https://sammyfang.tw";
+
+  return [
+    '<div style="padding:14px 22px;background:#0f172a;color:#cbd5e1;font-size:12px;border-top:1px solid #1e293b;">',
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">',
+    "<tr>",
+    `<td style="vertical-align:middle;">${escapeHtml(text)}</td>`,
+    `<td style="vertical-align:middle;text-align:right;"><a href="${escapeHtml(url)}" style="color:#93c5fd;text-decoration:none;font-weight:700;">${escapeHtml(url.replace(/^https?:\/\//, ""))}</a></td>`,
+    "</tr>",
+    "</table>",
+    "</div>",
+  ].join("");
+}
+
 function buildReportHtml(config, record, standingReport, options = {}) {
   const isWarning = options.kind === "warning";
   const minutes = options.warningMinutes || config.monitor.warning_minutes || 5;
@@ -930,6 +1311,8 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     buildCard("Report type", isWarning ? `${minutes}-minute warning` : "hourly"),
     "</tr>",
     "</table>",
+    buildRecommendationsHtml(options.recommendations),
+    buildMetricAlertsHtml(options.metricAlerts),
     !isWarning ? buildOperationalSnapshotHtml(options.operationalSnapshot) : "",
     '<div style="padding:0 22px 18px;">',
     '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Team Standing</div>',
@@ -944,7 +1327,7 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     `<tbody>${buildStandingRowsHtml(standingReport)}</tbody>`,
     "</table>",
     "</div>",
-    '<div style="padding:12px 22px;background:#f8fafc;color:#64748b;font-size:12px;border-top:1px solid #d8dee9;">Generated by MGT267 Watchdog.</div>',
+    buildEmailFooterHtml(config),
     "</div></div></body></html>",
   ].join("");
 }
@@ -961,14 +1344,31 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
     throw new Error("Email report is enabled, but email.recipients is empty");
   }
 
-  const subject = buildEmailSubject(config, record, options);
-  const text = buildReportText(config, record, standingReport, options);
-  const html = buildReportHtml(config, record, standingReport, options);
+  const metricAlerts =
+    options.metricAlerts ?? collectMetricAlerts(config, options.operationalSnapshot);
+  const recommendations =
+    options.recommendations ??
+    (await buildRecommendations(config, record, standingReport, {
+      ...options,
+      metricAlerts,
+    }));
+  const renderOptions = {
+    ...options,
+    metricAlerts,
+    recommendations,
+  };
+  const subject = buildEmailSubject(config, record, renderOptions);
+  const text = buildReportText(config, record, standingReport, renderOptions);
+  const html = buildReportHtml(config, record, standingReport, renderOptions);
 
   if (isEmailDryRun()) {
     console.log("EMAIL_DRY_RUN=1, email report not sent.");
     console.log(`Dry-run recipients: ${recipients.join(", ")}`);
     console.log(`Dry-run subject: ${subject}`);
+    console.log(`Recommendations source: ${recommendations.source}`);
+    for (const item of recommendations.items) {
+      console.log(`- ${item}`);
+    }
     return false;
   }
 

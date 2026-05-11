@@ -52,3 +52,4 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

@@ -56,7 +56,51 @@
     "warehouse_inventory_threshold": 450,
     "warning_minutes": 15,
     "send_report_every_run": true,
-    "gap_percentage_formula": "(target_cash - team_cash) / team_cash * 100"
+    "gap_percentage_formula": "(target_cash - team_cash) / team_cash * 100",
+    "metric_thresholds": {
+      "warehouse_inventory:mail": {
+        "label": "Warehouse mail inventory",
+        "min": null,
+        "max": null
+      },
+      "warehouse_inventory:truck": {
+        "label": "Warehouse truck inventory",
+        "min": null,
+        "max": null
+      },
+      "warehouse_shipments:Calopeia": {
+        "label": "Warehouse shipments",
+        "min": null,
+        "max": null
+      },
+      "factory_wip:Calopeia": {
+        "label": "Factory WIP",
+        "min": null,
+        "max": null
+      },
+      "hq_demand:Calopeia": {
+        "label": "Headquarters demand",
+        "min": null,
+        "max": null
+      },
+      "hq_lost_demand:Calopeia": {
+        "label": "Headquarters lost demand",
+        "min": null,
+        "max": null
+      },
+      "hq_cash_balance:value": {
+        "label": "Headquarters cash balance",
+        "min": null,
+        "max": null
+      }
+    }
+  },
+  "ai": {
+    "enabled": true,
+    "provider": "gemini",
+    "api_key_env": "GEMINI_API_KEY",
+    "model": "gemini-2.5-flash",
+    "max_suggestions": 4
   },
   "email": {
     "enabled": true,
@@ -66,7 +110,11 @@
       "hhuan238@ucr.edu",
       "yfang097@ucr.edu"
     ],
-    "subject_prefix": "MGT267 Warehouse Watchdog"
+    "subject_prefix": "MGT267 Warehouse Watchdog",
+    "footer": {
+      "text": "Developed by Yung-Sian Fang",
+      "url": "https://sammyfang.tw"
+    }
   },
   "output": {
     "state_dir": ".monitor-state",
