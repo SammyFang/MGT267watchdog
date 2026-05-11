@@ -1,6 +1,6 @@
 # MGT267 Watchdog
 
-This project logs in to the Supply Chain Game, tracks cash, day, WH1 warehouse inventory, and overall team standings, then sends an hourly email report.
+This project logs in to the Supply Chain Game, tracks cash, day, WH1 warehouse inventory, and overall team standings, then sends scheduled email reports.
 
 ## Editable Settings
 
@@ -9,16 +9,28 @@ Most settings are in `monitor_config.json`:
 - `crawl.interval_minutes`: local watch interval, currently `60`.
 - `monitor.target_team`: team to lock for comparison, currently `group7`.
 - `monitor.warehouse_inventory_threshold`: inventory alert threshold, currently `450`.
+- `monitor.warning_minutes`: warning email interval label, currently `15`.
 - `monitor.send_report_every_run`: send one email each scheduled run.
 - `email.recipients`: notification recipient list.
 
-GitHub Actions schedule is in `.github/workflows/monitor.yml`:
+Configured recipients:
+
+- `950154@gmail.com`
+- `wgong009@ucr.edu`
+- `hhuan238@ucr.edu`
+- `yfang097@ucr.edu`
+
+GitHub Actions schedules:
 
 ```yaml
+# .github/workflows/warning.yml
+- cron: "*/15 * * * *"
+
+# .github/workflows/monitor.yml
 - cron: "0 * * * *"
 ```
 
-GitHub requires cron schedules to live in the workflow file, so edit that line if the cloud schedule needs to change.
+GitHub requires cron schedules to live in workflow files, so edit those lines if the cloud schedule needs to change.
 
 ## Standing Gap Formula
 
@@ -75,16 +87,17 @@ Local test without sending mail:
 $env:EMAIL_DRY_RUN='1'; npm run monitor
 ```
 
-Send the two email templates without sending mail locally:
+Send the email templates without sending mail locally:
 
 ```powershell
+$env:EMAIL_DRY_RUN='1'; npm run warning-email
 $env:EMAIL_DRY_RUN='1'; npm run test-email
 ```
 
 The `Email Smoke Test` GitHub workflow sends two real test emails with repository secrets:
 
 - `[TEST] hourly report`
-- `[TEST] 5-minute warning`
+- `[TEST] 15-minute warning`
 
 It can be run manually from GitHub Actions. It also runs on push only when the commit message contains `[email-test]`.
 

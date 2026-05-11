@@ -910,6 +910,24 @@ async function sendTestEmails(config) {
   console.log(`Warehouse inventory: ${baseRecord.warehouseInventory}`);
 }
 
+async function sendWarningEmail(config) {
+  const { dashboard, inventoryTable, standingReport } = await crawl(config);
+  const warningMinutes = Number(config.monitor.warning_minutes || 15);
+  const record = createRecord(config, dashboard, inventoryTable, standingReport);
+  const emailSent = await sendReportEmail(config, record, standingReport, {
+    kind: "warning",
+    warningMinutes,
+  });
+
+  console.log(`${warningMinutes}-minute warning email summary:`);
+  console.log(`Email sent: ${emailSent ? "yes" : "no"}`);
+  console.log(`Target team: ${record.targetTeam}`);
+  console.log(`Target cash: ${record.targetCash}`);
+  console.log(`Dashboard day: ${record.dashboardDay}`);
+  console.log(`Warehouse inventory: ${record.warehouseInventory}`);
+  console.log(`Inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
+}
+
 async function main() {
   const config = readJson(CONFIG_PATH);
 
@@ -924,6 +942,11 @@ async function main() {
 
   if (process.argv.includes("--test-email")) {
     await sendTestEmails(config);
+    return;
+  }
+
+  if (process.argv.includes("--warning-email")) {
+    await sendWarningEmail(config);
     return;
   }
 

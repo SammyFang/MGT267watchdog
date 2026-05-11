@@ -16,14 +16,17 @@
   "monitor": {
     "target_team": "group7",
     "warehouse_inventory_threshold": 450,
-    "warning_minutes": 5,
+    "warning_minutes": 15,
     "send_report_every_run": true,
     "gap_percentage_formula": "(target_cash - team_cash) / team_cash * 100"
   },
   "email": {
     "enabled": true,
     "recipients": [
-      "950154@gmail.com"
+      "950154@gmail.com",
+      "wgong009@ucr.edu",
+      "hhuan238@ucr.edu",
+      "yfang097@ucr.edu"
     ],
     "subject_prefix": "MGT267 Warehouse Watchdog"
   },
