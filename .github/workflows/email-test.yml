@@ -5,12 +5,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - ".github/workflows/email-test.yml"
-      - "src/monitor.js"
-      - "package.json"
-      - "package-lock.json"
-      - "monitor_config.json"
 
 permissions:
   contents: read

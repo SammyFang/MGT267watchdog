@@ -7,12 +7,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - ".github/workflows/warning.yml"
-      - "src/monitor.js"
-      - "monitor_config.json"
-      - "package.json"
-      - "package-lock.json"
 
 permissions:
   contents: read
