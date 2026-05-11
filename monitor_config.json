@@ -1,10 +1,11 @@
 {
   "crawl": {
-    "interval_minutes": 15,
+    "interval_minutes": 60,
     "timezone": "America/Los_Angeles",
     "entry_url": "https://op.responsive.net/sc/riverside267/entry.html",
     "login_url": "https://op.responsive.net/SupplyChain/SCAccess",
-    "warehouse_inventory_url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+inventory&data=WH1"
+    "warehouse_inventory_url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+inventory&data=WH1",
+    "standing_url": "https://op.responsive.net/SupplyChain/SCStanding"
   },
   "credentials": {
     "team_id_env": "SC_TEAM_ID",
@@ -13,8 +14,10 @@
     "default_institution": "riverside267"
   },
   "monitor": {
+    "target_team": "group7",
     "warehouse_inventory_threshold": 450,
-    "notification_cooldown_minutes": 0
+    "send_report_every_run": true,
+    "gap_percentage_formula": "(target_cash - team_cash) / team_cash * 100"
   },
   "email": {
     "enabled": true,
@@ -27,6 +30,7 @@
     "state_dir": ".monitor-state",
     "latest_json": ".monitor-state/latest.json",
     "history_csv": ".monitor-state/history.csv",
-    "warehouse_inventory_csv": ".monitor-state/warehouse_inventory_latest.csv"
+    "warehouse_inventory_csv": ".monitor-state/warehouse_inventory_latest.csv",
+    "standing_gaps_csv": ".monitor-state/standing_gaps_latest.csv"
   }
 }

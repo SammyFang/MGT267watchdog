@@ -145,6 +145,34 @@ function extractCashNumber(cashText) {
   return Number.isFinite(value) ? value : null;
 }
 
+function formatSignedCurrency(value) {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+
+  if (value === 0) {
+    return "$0.00";
+  }
+
+  return `${value > 0 ? "+" : "-"}$${formatNumber(Math.abs(value), 2)}`;
+}
+
+function formatSignedPercent(value) {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+
+  if (value === 0) {
+    return "0.00%";
+  }
+
+  return `${value > 0 ? "+" : "-"}${Math.abs(value).toFixed(2)}%`;
+}
+
+function stripTags(html) {
+  return decodeHtml(html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "));
+}
+
 function extractPlotLines(html) {
   const linePattern =
     /\{label:\s*'([^']+)'\s*,\s*name:\s*'([^']+)'\s*,\s*points:\s*'([^']*)'/g;
@@ -284,6 +312,71 @@ function parseWarehouseInventoryTable(html) {
   return { header, rows, latestWarehouse };
 }
 
+function parseStandingTable(html, targetTeam) {
+  const tableMatch = html.match(
+    /<table[^>]*id=['"]?standingTable['"]?[^>]*>([\s\S]*?)<\/table>/i,
+  );
+
+  if (!tableMatch) {
+    throw new Error("Could not find standing table");
+  }
+
+  const rowPattern =
+    /<tr[^>]*>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<\/tr>/gi;
+  const standings = [];
+
+  for (const match of tableMatch[1].matchAll(rowPattern)) {
+    const rankText = stripTags(match[1]);
+    const team = stripTags(match[2]);
+    const cash = stripTags(match[3]);
+    const rank = Number.parseInt(rankText, 10);
+    const cashNumber = extractCashNumber(cash);
+
+    if (!Number.isFinite(rank) || !team || cashNumber === null) {
+      continue;
+    }
+
+    standings.push({
+      rank,
+      team,
+      cash,
+      cashNumber,
+    });
+  }
+
+  if (standings.length === 0) {
+    throw new Error("Standing table did not contain team rows");
+  }
+
+  const normalizedTarget = targetTeam.toLowerCase();
+  const target = standings.find(
+    (standing) => standing.team.toLowerCase() === normalizedTarget,
+  );
+
+  if (!target) {
+    throw new Error(`Could not find target team in standing table: ${targetTeam}`);
+  }
+
+  const rows = standings.map((standing) => {
+    const gapAmount = target.cashNumber - standing.cashNumber;
+    const gapPercent =
+      standing.cashNumber === 0 ? null : (gapAmount / standing.cashNumber) * 100;
+
+    return {
+      ...standing,
+      gapAmount,
+      gapAmountText: formatSignedCurrency(gapAmount),
+      gapPercent,
+      gapPercentText: formatSignedPercent(gapPercent),
+    };
+  });
+
+  return {
+    target,
+    rows,
+  };
+}
+
 function buildWarehouseCsv({ header, rows }) {
   const csvLines = [
     header.map(csvValue).join(","),
@@ -291,6 +384,30 @@ function buildWarehouseCsv({ header, rows }) {
   ];
 
   return `\uFEFF${csvLines.join("\r\n")}\r\n`;
+}
+
+function buildStandingGapsCsv({ rows }) {
+  const header = [
+    "rank",
+    "team",
+    "cash",
+    "cash_number",
+    "gap_amount_target_minus_team",
+    "gap_percent_vs_team_cash",
+  ];
+  const csvRows = rows.map((row) => [
+    row.rank,
+    row.team,
+    row.cash,
+    row.cashNumber,
+    row.gapAmountText,
+    row.gapPercentText,
+  ]);
+
+  return `\uFEFF${[
+    header.map(csvValue).join(","),
+    ...csvRows.map((row) => row.map(csvValue).join(",")),
+  ].join("\r\n")}\r\n`;
 }
 
 function appendHistory(filePath, record) {
@@ -302,8 +419,13 @@ function appendHistory(filePath, record) {
     "dashboard_day",
     "warehouse_inventory",
     "warehouse_day",
+    "target_team",
+    "target_rank",
+    "target_cash",
+    "target_cash_number",
     "threshold",
-    "notified",
+    "inventory_alert",
+    "email_sent",
   ];
   const row = [
     record.checkedAt,
@@ -312,16 +434,30 @@ function appendHistory(filePath, record) {
     record.dashboardDay,
     record.warehouseInventory,
     record.warehouseDay,
+    record.targetTeam,
+    record.targetRank,
+    record.targetCash,
+    record.targetCashNumber ?? "",
     record.threshold,
-    record.notified ? "yes" : "no",
+    record.inventoryAlert ? "yes" : "no",
+    record.emailSent ? "yes" : "no",
   ];
+  const headerLine = header.map(csvValue).join(",");
   const line = row.map(csvValue).join(",");
+  let prefix = "";
 
-  fs.appendFileSync(
-    filePath,
-    `${exists ? "" : `${header.map(csvValue).join(",")}\n`}${line}\n`,
-    "utf8",
-  );
+  if (!exists) {
+    prefix = `${headerLine}\n`;
+  } else {
+    const firstLine = fs.readFileSync(filePath, "utf8").split(/\r?\n/, 1)[0];
+
+    if (firstLine !== headerLine) {
+      fs.renameSync(filePath, `${filePath}.bak-${Date.now()}`);
+      prefix = `${headerLine}\n`;
+    }
+  }
+
+  fs.appendFileSync(filePath, `${prefix}${line}\n`, "utf8");
 }
 
 function localizedTime(isoString, timezone) {
@@ -335,28 +471,6 @@ function localizedTime(isoString, timezone) {
     second: "2-digit",
     hour12: false,
   }).format(new Date(isoString));
-}
-
-function shouldNotify({ currentInventory, previousInventory, lastNotifiedAt, threshold, cooldownMinutes }) {
-  if (currentInventory < threshold) {
-    return false;
-  }
-
-  const crossedFromBelow =
-    previousInventory === null ||
-    previousInventory === undefined ||
-    previousInventory < threshold;
-
-  if (crossedFromBelow) {
-    return true;
-  }
-
-  if (!cooldownMinutes || cooldownMinutes <= 0 || !lastNotifiedAt) {
-    return false;
-  }
-
-  const elapsedMs = Date.now() - new Date(lastNotifiedAt).getTime();
-  return elapsedMs >= cooldownMinutes * 60 * 1000;
 }
 
 function createTransport() {
@@ -379,31 +493,81 @@ function createTransport() {
   });
 }
 
-async function sendAlert(config, record, previousInventory) {
-  if (!config.email.enabled) {
-    console.log("Email alert skipped because email.enabled=false");
-    return;
+function isEmailDryRun() {
+  return ["1", "true", "yes"].includes(
+    optionalEnv("EMAIL_DRY_RUN", "false").toLowerCase(),
+  );
+}
+
+function isEmailEnabled(config) {
+  const envOverride = optionalEnv("EMAIL_ENABLED", "").toLowerCase();
+
+  if (["0", "false", "no"].includes(envOverride)) {
+    return false;
+  }
+
+  return config.email.enabled;
+}
+
+function buildStandingLines(standingReport) {
+  return standingReport.rows.map((row) =>
+    [
+      `rank ${row.rank}`,
+      row.team,
+      row.cash,
+      row.gapAmountText,
+      row.gapPercentText,
+    ].join(" | "),
+  );
+}
+
+function buildReportText(config, record, standingReport) {
+  return [
+    `${config.email.subject_prefix} hourly report`,
+    "",
+    `Checked at: ${record.checkedAtLocal} (${config.crawl.timezone})`,
+    `Target team: ${record.targetTeam}`,
+    `Target rank: ${record.targetRank}`,
+    `Target cash: ${record.targetCash}`,
+    `Dashboard day: ${record.dashboardDay}`,
+    `Warehouse inventory: ${record.warehouseInventory}`,
+    `Warehouse inventory day: ${record.warehouseDay}`,
+    `Warehouse threshold: ${record.threshold}`,
+    `Inventory alert: ${record.inventoryAlert ? "YES" : "no"}`,
+    "",
+    "Gap formula:",
+    "gap_amount = target_cash - team_cash",
+    "gap_percent = gap_amount / team_cash * 100",
+    "",
+    "Rank | Team | Cash | Gap amount | Gap percent",
+    ...buildStandingLines(standingReport),
+  ].join("\n");
+}
+
+async function sendReportEmail(config, record, standingReport) {
+  if (!isEmailEnabled(config)) {
+    console.log("Email report skipped because email is disabled");
+    return false;
   }
 
   const recipients = config.email.recipients || [];
 
   if (recipients.length === 0) {
-    throw new Error("Email alert is enabled, but email.recipients is empty");
+    throw new Error("Email report is enabled, but email.recipients is empty");
+  }
+
+  const alertPrefix = record.inventoryAlert ? "ALERT " : "";
+  const subject = `${alertPrefix}${config.email.subject_prefix}: ${record.targetTeam} ${record.targetCash} day ${record.dashboardDay}`;
+  const text = buildReportText(config, record, standingReport);
+
+  if (isEmailDryRun()) {
+    console.log("EMAIL_DRY_RUN=1, email report not sent.");
+    console.log(`Dry-run recipients: ${recipients.join(", ")}`);
+    console.log(`Dry-run subject: ${subject}`);
+    return false;
   }
 
   const transporter = createTransport();
-  const subject = `${config.email.subject_prefix}: warehouse inventory ${record.warehouseInventory}`;
-  const text = [
-    "Warehouse inventory threshold reached.",
-    "",
-    `Checked at: ${record.checkedAtLocal} (${config.crawl.timezone})`,
-    `Dashboard day: ${record.dashboardDay}`,
-    `Cash: ${record.cash}`,
-    `Warehouse inventory: ${record.warehouseInventory}`,
-    `Warehouse inventory day: ${record.warehouseDay}`,
-    `Threshold: ${record.threshold}`,
-    `Previous warehouse inventory: ${previousInventory ?? "n/a"}`,
-  ].join("\n");
 
   await transporter.sendMail({
     from: requiredEnv("SMTP_FROM"),
@@ -411,6 +575,8 @@ async function sendAlert(config, record, previousInventory) {
     subject,
     text,
   });
+
+  return true;
 }
 
 async function crawl(config) {
@@ -464,10 +630,23 @@ async function crawl(config) {
   }
 
   const inventoryTable = parseWarehouseInventoryTable(inventoryHtml);
+  const standingResponse = await request(
+    config.crawl.standing_url,
+    { method: "POST" },
+    cookieJar,
+  );
+  const standingHtml = await standingResponse.text();
+
+  if (!standingResponse.ok) {
+    throw new Error(`Standing table failed with HTTP ${standingResponse.status}`);
+  }
+
+  const standingReport = parseStandingTable(standingHtml, config.monitor.target_team);
 
   return {
     dashboard,
     inventoryTable,
+    standingReport,
   };
 }
 
@@ -478,16 +657,19 @@ async function runOnce(config) {
     process.cwd(),
     config.output.warehouse_inventory_csv,
   );
+  const standingCsvPath = path.resolve(
+    process.cwd(),
+    config.output.standing_gaps_csv,
+  );
   ensureDir(path.resolve(process.cwd(), config.output.state_dir));
 
   const previousState = readJson(statePath, {});
-  const { dashboard, inventoryTable } = await crawl(config);
+  const { dashboard, inventoryTable, standingReport } = await crawl(config);
   const threshold = Number(config.monitor.warehouse_inventory_threshold);
-  const cooldownMinutes = Number(config.monitor.notification_cooldown_minutes || 0);
   const currentInventory = inventoryTable.latestWarehouse.inventory;
-  const previousInventory = previousState.last_warehouse_inventory;
   const checkedAt = new Date().toISOString();
-  let notified = false;
+  const inventoryAlert = currentInventory >= threshold;
+  let emailSent = false;
 
   const record = {
     checkedAt,
@@ -497,24 +679,21 @@ async function runOnce(config) {
     dashboardDay: dashboard.day,
     warehouseInventory: currentInventory,
     warehouseDay: inventoryTable.latestWarehouse.day,
+    targetTeam: standingReport.target.team,
+    targetRank: standingReport.target.rank,
+    targetCash: standingReport.target.cash,
+    targetCashNumber: standingReport.target.cashNumber,
     threshold,
+    inventoryAlert,
   };
 
-  if (
-    shouldNotify({
-      currentInventory,
-      previousInventory,
-      lastNotifiedAt: previousState.last_notified_at,
-      threshold,
-      cooldownMinutes,
-    })
-  ) {
-    await sendAlert(config, record, previousInventory);
-    notified = true;
+  if (config.monitor.send_report_every_run) {
+    emailSent = await sendReportEmail(config, record, standingReport);
   }
 
   fs.writeFileSync(inventoryCsvPath, buildWarehouseCsv(inventoryTable), "utf8");
-  appendHistory(historyPath, { ...record, notified });
+  fs.writeFileSync(standingCsvPath, buildStandingGapsCsv(standingReport), "utf8");
+  appendHistory(historyPath, { ...record, emailSent });
   fs.writeFileSync(
     statePath,
     `${JSON.stringify(
@@ -526,13 +705,18 @@ async function runOnce(config) {
         last_dashboard_day: dashboard.day,
         last_warehouse_inventory: currentInventory,
         last_warehouse_day: inventoryTable.latestWarehouse.day,
+        last_target_team: standingReport.target.team,
+        last_target_rank: standingReport.target.rank,
+        last_target_cash: standingReport.target.cash,
+        last_target_cash_number: standingReport.target.cashNumber,
         last_threshold: threshold,
-        last_notified_at: notified
+        last_inventory_alert: inventoryAlert,
+        last_email_sent_at: emailSent
           ? checkedAt
-          : previousState.last_notified_at || null,
-        last_notified_at_local: notified
+          : previousState.last_email_sent_at || null,
+        last_email_sent_at_local: emailSent
           ? record.checkedAtLocal
-          : previousState.last_notified_at_local || null,
+          : previousState.last_email_sent_at_local || null,
       },
       null,
       2,
@@ -543,12 +727,17 @@ async function runOnce(config) {
   console.log(`Checked at: ${record.checkedAtLocal} (${config.crawl.timezone})`);
   console.log(`Cash: ${dashboard.cash}`);
   console.log(`Dashboard day: ${dashboard.day}`);
+  console.log(`Target team: ${standingReport.target.team}`);
+  console.log(`Target rank: ${standingReport.target.rank}`);
+  console.log(`Target cash: ${standingReport.target.cash}`);
   console.log(`Warehouse inventory: ${currentInventory}`);
   console.log(`Warehouse inventory day: ${inventoryTable.latestWarehouse.day}`);
   console.log(`Threshold: ${threshold}`);
-  console.log(`Notification sent: ${notified ? "yes" : "no"}`);
+  console.log(`Inventory alert: ${inventoryAlert ? "yes" : "no"}`);
+  console.log(`Email sent: ${emailSent ? "yes" : "no"}`);
   console.log(`State: ${statePath}`);
   console.log(`History: ${historyPath}`);
+  console.log(`Standing gaps: ${standingCsvPath}`);
 }
 
 function sleep(ms) {
@@ -556,7 +745,7 @@ function sleep(ms) {
 }
 
 async function runWatch(config) {
-  const intervalMinutes = Number(config.crawl.interval_minutes || 15);
+  const intervalMinutes = Number(config.crawl.interval_minutes || 60);
 
   if (!Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {
     throw new Error("crawl.interval_minutes must be a positive number");
