@@ -100,7 +100,7 @@
     "provider": "gemini",
     "api_key_env": "GEMINI_API_KEY",
     "model": "gemini-2.5-flash",
-    "recommendation_language": "Traditional Chinese",
+    "recommendation_language": "English",
     "max_suggestions": 4
   },
   "email": {

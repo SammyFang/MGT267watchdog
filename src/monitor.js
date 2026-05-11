@@ -1078,37 +1078,37 @@ function buildFallbackRecommendations(config, record, standingReport, options = 
 
   if (record.inventoryAlert) {
     suggestions.push(
-      `倉庫庫存 ${record.warehouseInventory} 已達 ${record.threshold} 預警值；若需求支撐，優先降低入庫或加快出貨。`,
+      `Warehouse inventory ${record.warehouseInventory} has reached the ${record.threshold} alert; reduce inbound stock or accelerate shipments if demand supports it.`,
     );
   } else if (record.warehouseInventory <= 0 && lostDemand?.valueNumber > 0) {
     suggestions.push(
-      `倉庫庫存為 ${record.warehouseInventory} 且 lost demand 為 ${lostDemand.valueRaw}；優先恢復補貨與可出貨量。`,
+      `Warehouse inventory is ${record.warehouseInventory} while lost demand is ${lostDemand.valueRaw}; prioritize replenishment and outbound availability.`,
     );
   } else {
     suggestions.push(
-      `倉庫庫存 ${record.warehouseInventory} 低於 ${record.threshold} 預警值；維持生產與出貨貼近需求。`,
+      `Warehouse inventory ${record.warehouseInventory} is below the ${record.threshold} alert; keep production and shipments aligned with demand.`,
     );
   }
 
   if (lostDemand?.valueNumber > 0) {
     suggestions.push(
-      `Lost demand 為 ${lostDemand.valueRaw}；檢查瓶頸在倉庫庫存、出貨時點或工廠產出。`,
+      `Lost demand is ${lostDemand.valueRaw}; check whether warehouse stock, shipment timing, or factory output is the binding constraint.`,
     );
   }
 
   if (wip?.valueNumber > 0 && shipments?.valueNumber === 0) {
     suggestions.push(
-      `Factory WIP 為 ${wip.valueRaw} 且 shipments 為 ${shipments.valueRaw}；增加 WIP 前先檢查出貨流程。`,
+      `Factory WIP is ${wip.valueRaw} and shipments are ${shipments.valueRaw}; review the outbound flow before adding more WIP.`,
     );
   }
 
   if (standingReport.target.rank === 1) {
     suggestions.push(
-      `現金排名第 1、金額 ${record.targetCash}；保護領先時避免過量庫存成本與需求流失。`,
+      `Cash rank is 1 at ${record.targetCash}; protect the lead by avoiding excess inventory cost and missed demand.`,
     );
   } else {
     suggestions.push(
-      `現金排名第 ${standingReport.target.rank}；採取高成本追趕動作前先比對排名差距表。`,
+      `Cash rank is ${standingReport.target.rank}; compare the cash gap table before taking high-cost recovery actions.`,
     );
   }
 
@@ -1154,7 +1154,7 @@ function geminiApiKey(config) {
 
 function buildRecommendationPrompt(config, record, standingReport, options = {}) {
   const metricAlerts = options.metricAlerts || [];
-  const language = config.ai?.recommendation_language || "Traditional Chinese";
+  const language = config.ai?.recommendation_language || "English";
   const lines = [
     "You are advising a team in a supply chain simulation.",
     "Use only the data below. Do not invent missing values.",
