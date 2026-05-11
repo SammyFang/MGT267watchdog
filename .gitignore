@@ -1,0 +1,5 @@
+node_modules/
+.env
+.monitor-state/
+warehouse_inventory*.csv
+npm-debug.log*

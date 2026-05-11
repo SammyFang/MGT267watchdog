@@ -1,0 +1,32 @@
+{
+  "crawl": {
+    "interval_minutes": 15,
+    "timezone": "America/Los_Angeles",
+    "entry_url": "https://op.responsive.net/sc/riverside267/entry.html",
+    "login_url": "https://op.responsive.net/SupplyChain/SCAccess",
+    "warehouse_inventory_url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+inventory&data=WH1"
+  },
+  "credentials": {
+    "team_id_env": "SC_TEAM_ID",
+    "password_env": "SC_PASSWORD",
+    "institution_env": "SC_INSTITUTION",
+    "default_institution": "riverside267"
+  },
+  "monitor": {
+    "warehouse_inventory_threshold": 450,
+    "notification_cooldown_minutes": 0
+  },
+  "email": {
+    "enabled": true,
+    "recipients": [
+      "950154@gmail.com"
+    ],
+    "subject_prefix": "MGT267 Warehouse Watchdog"
+  },
+  "output": {
+    "state_dir": ".monitor-state",
+    "latest_json": ".monitor-state/latest.json",
+    "history_csv": ".monitor-state/history.csv",
+    "warehouse_inventory_csv": ".monitor-state/warehouse_inventory_latest.csv"
+  }
+}
