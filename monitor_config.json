@@ -5,7 +5,45 @@
     "entry_url": "https://op.responsive.net/sc/riverside267/entry.html",
     "login_url": "https://op.responsive.net/SupplyChain/SCAccess",
     "warehouse_inventory_url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+inventory&data=WH1",
-    "standing_url": "https://op.responsive.net/SupplyChain/SCStanding"
+    "standing_url": "https://op.responsive.net/SupplyChain/SCStanding",
+    "plot_sources": [
+      {
+        "id": "warehouse_inventory",
+        "section": "Warehouse",
+        "label": "Inventory",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+inventory&data=WH1"
+      },
+      {
+        "id": "warehouse_shipments",
+        "section": "Warehouse",
+        "label": "Shipments",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+shipments&data=SHIP1SEG1"
+      },
+      {
+        "id": "factory_wip",
+        "section": "Factory",
+        "label": "WIP",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+wip&data=WIP1"
+      },
+      {
+        "id": "hq_demand",
+        "section": "Headquarters",
+        "label": "Demand",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+demand&data=DEMAND1"
+      },
+      {
+        "id": "hq_lost_demand",
+        "section": "Headquarters",
+        "label": "Lost Demand",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+lost+demand&data=LOST1"
+      },
+      {
+        "id": "hq_cash_balance",
+        "section": "Headquarters",
+        "label": "Cash Balance",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+cash+balance&data=BALANCE"
+      }
+    ]
   },
   "credentials": {
     "team_id_env": "SC_TEAM_ID",
@@ -35,6 +73,7 @@
     "latest_json": ".monitor-state/latest.json",
     "history_csv": ".monitor-state/history.csv",
     "warehouse_inventory_csv": ".monitor-state/warehouse_inventory_latest.csv",
-    "standing_gaps_csv": ".monitor-state/standing_gaps_latest.csv"
+    "standing_gaps_csv": ".monitor-state/standing_gaps_latest.csv",
+    "operational_snapshot_csv": ".monitor-state/operational_snapshot_latest.csv"
   }
 }

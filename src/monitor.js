@@ -188,11 +188,11 @@ function extractPlotLines(html) {
   const lines = [];
 
   for (const match of html.matchAll(linePattern)) {
-    const points = match[3]
+    const pointTexts = match[3]
       .trim()
       .split(/\s+/)
-      .filter(Boolean)
-      .map(Number);
+      .filter(Boolean);
+    const points = pointTexts.map(Number);
 
     if (points.length % 2 !== 0 || points.some((point) => Number.isNaN(point))) {
       throw new Error(`Invalid points data for ${match[1]}`);
@@ -202,6 +202,7 @@ function extractPlotLines(html) {
       label: decodeHtml(match[1]),
       name: match[2],
       points,
+      pointTexts,
     });
   }
 
@@ -215,6 +216,26 @@ function extractPlotLines(html) {
 function extractAxisLabel(html) {
   const match = html.match(/hAxisLabel:\s*'([^']+)'/i);
   return match ? decodeHtml(match[1]) : "day";
+}
+
+function extractDecimalRule(html, key, fallbackPrecision) {
+  const blockMatch = html.match(
+    new RegExp(`['"]${key}['"]\\s*:\\s*\\{([\\s\\S]*?)\\}`, "i"),
+  );
+  const block = blockMatch ? blockMatch[1] : "";
+  const precisionMatch = block.match(/decimalPrecision\s*:\s*(\d+)/i);
+  const groupingSizeMatch = block.match(/groupingSize\s*:\s*(\d+)/i);
+  const groupingSeparatorMatch = block.match(/groupingSeparator\s*:\s*'([^']*)'/i);
+  const decimalSeparatorMatch = block.match(/decimalSeparator\s*:\s*'([^']*)'/i);
+
+  return {
+    decimalPrecision: precisionMatch
+      ? Number.parseInt(precisionMatch[1], 10)
+      : fallbackPrecision,
+    groupingSeparator: groupingSeparatorMatch ? groupingSeparatorMatch[1] : ",",
+    groupingSize: groupingSizeMatch ? Number.parseInt(groupingSizeMatch[1], 10) : 3,
+    decimalSeparator: decimalSeparatorMatch ? decimalSeparatorMatch[1] : ".",
+  };
 }
 
 function formatNumber(value, precision, groupingSeparator = ",", groupingSize = 3) {
@@ -236,12 +257,23 @@ function formatNumber(value, precision, groupingSeparator = ",", groupingSize = 
   }`;
 }
 
+function formatByRule(value, rule) {
+  const text = formatNumber(
+    value,
+    rule.decimalPrecision,
+    rule.groupingSeparator,
+    rule.groupingSize,
+  );
+
+  return rule.decimalSeparator === "." ? text : text.replace(".", rule.decimalSeparator);
+}
+
 function csvValue(value) {
   const text = String(value ?? "");
   return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-function buildPlotRows(lines) {
+function buildPlotRows(lines, xRule, yRule) {
   const indexes = Array(lines.length).fill(0);
   const totalPoints = lines.reduce((sum, line) => sum + line.points.length / 2, 0);
   const rows = [];
@@ -272,18 +304,21 @@ function buildPlotRows(lines) {
     }
 
     const rawRow = Array(lines.length + 1).fill(null);
+    const sourceRow = Array(lines.length + 1).fill("");
     const formattedRow = Array(lines.length + 1).fill("");
     rawRow[0] = minX;
-    formattedRow[0] = formatNumber(minX, 3);
+    sourceRow[0] = lines[selected[0]].pointTexts[indexes[selected[0]]];
+    formattedRow[0] = formatByRule(minX, xRule);
 
     for (const lineIndex of selected) {
       const value = lines[lineIndex].points[indexes[lineIndex] + 1];
       rawRow[lineIndex + 1] = value;
-      formattedRow[lineIndex + 1] = formatNumber(value, 0);
+      sourceRow[lineIndex + 1] = lines[lineIndex].pointTexts[indexes[lineIndex] + 1];
+      formattedRow[lineIndex + 1] = formatByRule(value, yRule);
       indexes[lineIndex] += 2;
     }
 
-    rows.push({ raw: rawRow, formatted: formattedRow });
+    rows.push({ raw: rawRow, source: sourceRow, formatted: formattedRow });
     consumed += selected.length;
   }
 
@@ -293,7 +328,11 @@ function buildPlotRows(lines) {
 function parseWarehouseInventoryTable(html) {
   const lines = extractPlotLines(html);
   const header = [extractAxisLabel(html), ...lines.map((line) => line.label)];
-  const rows = buildPlotRows(lines);
+  const rows = buildPlotRows(
+    lines,
+    extractDecimalRule(html, "x-data", 3),
+    extractDecimalRule(html, "y-data", 0),
+  );
   const warehouseIndex = header.indexOf("warehouse");
 
   if (warehouseIndex < 0) {
@@ -319,6 +358,163 @@ function parseWarehouseInventoryTable(html) {
   }
 
   return { header, rows, latestWarehouse };
+}
+
+function metricKey(sourceId, seriesName) {
+  return `${sourceId}:${String(seriesName || "value").trim() || "value"}`;
+}
+
+function formatDelta(value) {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+
+  if (value === 0) {
+    return "0";
+  }
+
+  const abs = Math.abs(value);
+  const precision = abs >= 100 ? 2 : abs >= 1 ? 4 : 6;
+  return `${value > 0 ? "+" : "-"}${abs.toFixed(precision).replace(/\.?0+$/, "")}`;
+}
+
+function formatChangePercent(value) {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+
+  if (value === 0) {
+    return "0.00%";
+  }
+
+  return `${value > 0 ? "+" : "-"}${Math.abs(value).toFixed(2)}%`;
+}
+
+function parsePlotSnapshot(html, source) {
+  const lines = extractPlotLines(html);
+  const xRule = extractDecimalRule(html, "x-data", 3);
+  const yRule = extractDecimalRule(html, "y-data", 0);
+  const rows = buildPlotRows(lines, xRule, yRule);
+  const series = lines.map((line) => {
+    const lastIndex = line.points.length - 2;
+    const dayNumber = line.points[lastIndex];
+    const valueNumber = line.points[lastIndex + 1];
+
+    return {
+      key: metricKey(source.id, line.name || line.label),
+      section: source.section,
+      plot: source.label,
+      series: line.label.trim() || "value",
+      day: formatByRule(dayNumber, xRule),
+      dayRaw: line.pointTexts[lastIndex],
+      value: formatByRule(valueNumber, yRule),
+      valueRaw: line.pointTexts[lastIndex + 1],
+      valueNumber,
+    };
+  });
+
+  return {
+    id: source.id,
+    section: source.section,
+    label: source.label,
+    axisLabel: extractAxisLabel(html),
+    header: [extractAxisLabel(html), ...lines.map((line) => line.label)],
+    rows,
+    series,
+  };
+}
+
+function buildOperationalSnapshot(plotSnapshots, previousMetrics = {}) {
+  const metrics = {};
+  const sections = [];
+  const sectionMap = new Map();
+
+  for (const plot of plotSnapshots) {
+    if (!sectionMap.has(plot.section)) {
+      const section = { name: plot.section, plots: [] };
+      sectionMap.set(plot.section, section);
+      sections.push(section);
+    }
+
+    const enrichedSeries = plot.series.map((series) => {
+      const previous = previousMetrics[series.key] || null;
+      const previousValueNumber =
+        previous && Number.isFinite(previous.valueNumber)
+          ? previous.valueNumber
+          : null;
+      const delta =
+        previousValueNumber === null ? null : series.valueNumber - previousValueNumber;
+      const changePercent =
+        previousValueNumber === null || previousValueNumber === 0
+          ? null
+          : (delta / Math.abs(previousValueNumber)) * 100;
+
+      const enriched = {
+        ...series,
+        previousValueRaw: previous ? previous.valueRaw : "",
+        previousDayRaw: previous ? previous.dayRaw : "",
+        delta,
+        deltaText: delta === null ? "" : formatDelta(delta),
+        changePercent,
+        changePercentText:
+          changePercent === null ? "" : formatChangePercent(changePercent),
+      };
+
+      metrics[series.key] = {
+        section: series.section,
+        plot: series.plot,
+        series: series.series,
+        dayRaw: series.dayRaw,
+        valueRaw: series.valueRaw,
+        valueNumber: series.valueNumber,
+      };
+
+      return enriched;
+    });
+
+    sectionMap.get(plot.section).plots.push({
+      ...plot,
+      series: enrichedSeries,
+    });
+  }
+
+  return { sections, metrics };
+}
+
+function buildOperationalSnapshotCsv(snapshot) {
+  const header = [
+    "section",
+    "plot",
+    "series",
+    "day_raw",
+    "current_value_raw",
+    "previous_value_raw",
+    "delta",
+    "change_percent",
+  ];
+  const rows = [];
+
+  for (const section of snapshot.sections) {
+    for (const plot of section.plots) {
+      for (const series of plot.series) {
+        rows.push([
+          section.name,
+          plot.label,
+          series.series,
+          series.dayRaw,
+          series.valueRaw,
+          series.previousValueRaw,
+          series.deltaText,
+          series.changePercentText,
+        ]);
+      }
+    }
+  }
+
+  return `\uFEFF${[
+    header.map(csvValue).join(","),
+    ...rows.map((row) => row.map(csvValue).join(",")),
+  ].join("\r\n")}\r\n`;
 }
 
 function parseStandingTable(html, targetTeam) {
@@ -530,6 +726,36 @@ function buildStandingLines(standingReport) {
   );
 }
 
+function buildOperationalLines(snapshot) {
+  if (!snapshot) {
+    return [];
+  }
+
+  const lines = [];
+
+  for (const section of snapshot.sections) {
+    lines.push("");
+    lines.push(`[${section.name}]`);
+
+    for (const plot of section.plots) {
+      for (const series of plot.series) {
+        lines.push(
+          [
+            plot.label,
+            series.series,
+            `day ${series.dayRaw}`,
+            `current ${series.valueRaw}`,
+            `1h ${series.deltaText || "n/a"}`,
+            `${series.changePercentText || "n/a"}`,
+          ].join(" | "),
+        );
+      }
+    }
+  }
+
+  return lines;
+}
+
 function buildEmailSubject(config, record, options = {}) {
   const testPrefix = options.test ? "[TEST] " : "";
   const alertPrefix = record.inventoryAlert ? "ALERT " : "";
@@ -560,10 +786,7 @@ function buildReportText(config, record, standingReport, options = {}) {
     `Warehouse inventory day: ${record.warehouseDay}`,
     `Warehouse threshold: ${record.threshold}`,
     `Inventory alert: ${record.inventoryAlert ? "YES" : "no"}`,
-    "",
-    "Gap formula:",
-    "gap_amount = target_cash - team_cash",
-    "gap_percent = gap_amount / team_cash * 100",
+    ...buildOperationalLines(options.operationalSnapshot),
     "",
     "Rank | Team | Cash | Gap amount | Gap percent",
     ...buildStandingLines(standingReport),
@@ -600,6 +823,74 @@ function buildStandingRowsHtml(standingReport) {
       ].join("");
     })
     .join("");
+}
+
+function changeColor(value) {
+  if (!Number.isFinite(value)) {
+    return "#64748b";
+  }
+
+  if (value > 0) {
+    return "#047857";
+  }
+
+  if (value < 0) {
+    return "#b91c1c";
+  }
+
+  return "#334155";
+}
+
+function buildOperationalRowsHtml(snapshot) {
+  if (!snapshot) {
+    return "";
+  }
+
+  return snapshot.sections
+    .flatMap((section) =>
+      section.plots.flatMap((plot) =>
+        plot.series.map((series) => {
+          const color = changeColor(series.delta);
+
+          return [
+            "<tr>",
+            `<td style="padding:8px;border-bottom:1px solid #e2e8f0;font-weight:700;">${escapeHtml(section.name)}</td>`,
+            `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(plot.label)}</td>`,
+            `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(series.series)}</td>`,
+            `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(series.dayRaw)}</td>`,
+            `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:700;">${escapeHtml(series.valueRaw)}</td>`,
+            `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;color:${color};font-weight:700;">${escapeHtml(series.deltaText || "n/a")}</td>`,
+            `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;color:${color};font-weight:700;">${escapeHtml(series.changePercentText || "n/a")}</td>`,
+            "</tr>",
+          ].join("");
+        }),
+      ),
+    )
+    .join("");
+}
+
+function buildOperationalSnapshotHtml(snapshot) {
+  if (!snapshot) {
+    return "";
+  }
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Operations Snapshot</div>',
+    '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #d8dee9;border-radius:8px;overflow:hidden;font-size:13px;">',
+    '<thead><tr style="background:#e2e8f0;color:#334155;">',
+    '<th style="padding:9px;text-align:left;">Area</th>',
+    '<th style="padding:9px;text-align:left;">Metric</th>',
+    '<th style="padding:9px;text-align:left;">Series</th>',
+    '<th style="padding:9px;text-align:right;">Day</th>',
+    '<th style="padding:9px;text-align:right;">Current</th>',
+    '<th style="padding:9px;text-align:right;">1h Change</th>',
+    '<th style="padding:9px;text-align:right;">1h %</th>',
+    "</tr></thead>",
+    `<tbody>${buildOperationalRowsHtml(snapshot)}</tbody>`,
+    "</table>",
+    "</div>",
+  ].join("");
 }
 
 function buildReportHtml(config, record, standingReport, options = {}) {
@@ -639,8 +930,9 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     buildCard("Report type", isWarning ? `${minutes}-minute warning` : "hourly"),
     "</tr>",
     "</table>",
+    !isWarning ? buildOperationalSnapshotHtml(options.operationalSnapshot) : "",
     '<div style="padding:0 22px 18px;">',
-    '<div style="font-size:13px;color:#475569;margin-bottom:10px;">Gap formula: <b>target_cash - team_cash</b>; gap percent: <b>gap_amount / team_cash * 100</b>.</div>',
+    '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Team Standing</div>',
     '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #d8dee9;border-radius:8px;overflow:hidden;font-size:14px;">',
     '<thead><tr style="background:#e2e8f0;color:#334155;">',
     '<th style="padding:9px;text-align:right;">Rank</th>',
@@ -693,7 +985,7 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
   return true;
 }
 
-async function crawl(config) {
+async function crawl(config, options = {}) {
   const teamId = requiredEnv(config.credentials.team_id_env);
   const password = requiredEnv(config.credentials.password_env);
   const institution = optionalEnv(
@@ -744,6 +1036,25 @@ async function crawl(config) {
   }
 
   const inventoryTable = parseWarehouseInventoryTable(inventoryHtml);
+  const plotSnapshots = [];
+
+  if (options.includePlots !== false) {
+    for (const source of config.crawl.plot_sources || []) {
+      let plotHtml = inventoryHtml;
+
+      if (source.url !== config.crawl.warehouse_inventory_url) {
+        const plotResponse = await request(source.url, { method: "GET" }, cookieJar);
+        plotHtml = await plotResponse.text();
+
+        if (!plotResponse.ok) {
+          throw new Error(`${source.label} plot failed with HTTP ${plotResponse.status}`);
+        }
+      }
+
+      plotSnapshots.push(parsePlotSnapshot(plotHtml, source));
+    }
+  }
+
   const standingResponse = await request(
     config.crawl.standing_url,
     { method: "POST" },
@@ -760,6 +1071,7 @@ async function crawl(config) {
   return {
     dashboard,
     inventoryTable,
+    plotSnapshots,
     standingReport,
   };
 }
@@ -799,10 +1111,19 @@ async function runOnce(config) {
     process.cwd(),
     config.output.standing_gaps_csv,
   );
+  const operationalCsvPath = path.resolve(
+    process.cwd(),
+    config.output.operational_snapshot_csv,
+  );
   ensureDir(path.resolve(process.cwd(), config.output.state_dir));
 
   const previousState = readJson(statePath, {});
-  const { dashboard, inventoryTable, standingReport } = await crawl(config);
+  const { dashboard, inventoryTable, plotSnapshots, standingReport } =
+    await crawl(config);
+  const operationalSnapshot = buildOperationalSnapshot(
+    plotSnapshots,
+    previousState.last_operational_metrics || {},
+  );
   const checkedAt = new Date().toISOString();
   const record = createRecord(config, dashboard, inventoryTable, standingReport, {
     checkedAt,
@@ -810,11 +1131,18 @@ async function runOnce(config) {
   let emailSent = false;
 
   if (config.monitor.send_report_every_run) {
-    emailSent = await sendReportEmail(config, record, standingReport);
+    emailSent = await sendReportEmail(config, record, standingReport, {
+      operationalSnapshot,
+    });
   }
 
   fs.writeFileSync(inventoryCsvPath, buildWarehouseCsv(inventoryTable), "utf8");
   fs.writeFileSync(standingCsvPath, buildStandingGapsCsv(standingReport), "utf8");
+  fs.writeFileSync(
+    operationalCsvPath,
+    buildOperationalSnapshotCsv(operationalSnapshot),
+    "utf8",
+  );
   appendHistory(historyPath, { ...record, emailSent });
   fs.writeFileSync(
     statePath,
@@ -833,6 +1161,7 @@ async function runOnce(config) {
         last_target_cash_number: standingReport.target.cashNumber,
         last_threshold: record.threshold,
         last_inventory_alert: record.inventoryAlert,
+        last_operational_metrics: operationalSnapshot.metrics,
         last_email_sent_at: emailSent
           ? checkedAt
           : previousState.last_email_sent_at || null,
@@ -860,6 +1189,7 @@ async function runOnce(config) {
   console.log(`State: ${statePath}`);
   console.log(`History: ${historyPath}`);
   console.log(`Standing gaps: ${standingCsvPath}`);
+  console.log(`Operational snapshot: ${operationalCsvPath}`);
 }
 
 function sleep(ms) {
@@ -880,38 +1210,40 @@ async function runWatch(config) {
 }
 
 async function sendTestEmails(config) {
-  const { dashboard, inventoryTable, standingReport } = await crawl(config);
+  const previousState = readJson(
+    path.resolve(process.cwd(), config.output.latest_json),
+    {},
+  );
+  const { dashboard, inventoryTable, plotSnapshots, standingReport } =
+    await crawl(config);
+  const operationalSnapshot = buildOperationalSnapshot(
+    plotSnapshots,
+    previousState.last_operational_metrics || {},
+  );
   const checkedAt = new Date().toISOString();
   const baseRecord = createRecord(config, dashboard, inventoryTable, standingReport, {
     checkedAt,
   });
-  const warningRecord = {
-    ...baseRecord,
-    inventoryAlert: true,
-  };
-  const warningMinutes = Number(config.monitor.warning_minutes || 5);
 
   const hourlySent = await sendReportEmail(config, baseRecord, standingReport, {
     kind: "hourly",
     test: true,
-  });
-  const warningSent = await sendReportEmail(config, warningRecord, standingReport, {
-    kind: "warning",
-    test: true,
-    warningMinutes,
+    operationalSnapshot,
   });
 
   console.log("Test email summary:");
   console.log(`Hourly report email sent: ${hourlySent ? "yes" : "no"}`);
-  console.log(`${warningMinutes}-minute warning email sent: ${warningSent ? "yes" : "no"}`);
   console.log(`Target team: ${baseRecord.targetTeam}`);
   console.log(`Target cash: ${baseRecord.targetCash}`);
   console.log(`Dashboard day: ${baseRecord.dashboardDay}`);
   console.log(`Warehouse inventory: ${baseRecord.warehouseInventory}`);
+  console.log(`Operational metrics: ${Object.keys(operationalSnapshot.metrics).length}`);
 }
 
 async function sendWarningEmail(config) {
-  const { dashboard, inventoryTable, standingReport } = await crawl(config);
+  const { dashboard, inventoryTable, standingReport } = await crawl(config, {
+    includePlots: false,
+  });
   const warningMinutes = Number(config.monitor.warning_minutes || 15);
   const record = createRecord(config, dashboard, inventoryTable, standingReport);
   const emailSent = await sendReportEmail(config, record, standingReport, {

@@ -12,6 +12,7 @@ Most settings are in `monitor_config.json`:
 - `monitor.warning_minutes`: warning email interval label, currently `15`.
 - `monitor.send_report_every_run`: send one email each scheduled run.
 - `email.recipients`: notification recipient list.
+- `crawl.plot_sources`: warehouse, factory, and headquarters plot URLs included in hourly reports.
 
 Configured recipients:
 
@@ -94,10 +95,16 @@ $env:EMAIL_DRY_RUN='1'; npm run warning-email
 $env:EMAIL_DRY_RUN='1'; npm run test-email
 ```
 
-The `Email Smoke Test` GitHub workflow sends two real test emails with repository secrets:
+Hourly reports include:
+
+- warehouse inventory and shipments
+- factory WIP
+- headquarters demand, lost demand, and cash balance
+- current source values plus 1-hour change and 1-hour change rate when a previous hourly state exists
+
+The `Email Smoke Test` GitHub workflow sends one real test email with repository secrets:
 
 - `[TEST] hourly report`
-- `[TEST] 15-minute warning`
 
 It can be run manually from GitHub Actions. It also runs on push only when the commit message contains `[email-test]`.
 
@@ -113,3 +120,4 @@ Output files are written to `.monitor-state/`:
 - `history.csv`
 - `warehouse_inventory_latest.csv`
 - `standing_gaps_latest.csv`
+- `operational_snapshot_latest.csv`
