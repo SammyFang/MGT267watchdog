@@ -2,14 +2,24 @@ name: 15-Minute Warning Email
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/warning.yml"
+      - "src/monitor.js"
+      - "monitor_config.json"
+      - "package.json"
+      - "package-lock.json"
 
 permissions:
   contents: read
 
 jobs:
   warning-email:
+    if: github.event_name != 'push' || contains(github.event.head_commit.message, '[warning-now]')
     runs-on: ubuntu-latest
     timeout-minutes: 10
 

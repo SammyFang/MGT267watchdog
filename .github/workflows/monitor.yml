@@ -3,7 +3,7 @@ name: Supply Chain Watchdog
 on:
   schedule:
     # Edit this cron to change the GitHub-hosted crawl interval.
-    - cron: "0 * * * *"
+    - cron: "11 * * * *"
   workflow_dispatch:
   push:
     branches:

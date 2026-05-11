@@ -25,13 +25,14 @@ GitHub Actions schedules:
 
 ```yaml
 # .github/workflows/warning.yml
-- cron: "*/15 * * * *"
+- cron: "7,22,37,52 * * * *"
 
 # .github/workflows/monitor.yml
-- cron: "0 * * * *"
+- cron: "11 * * * *"
 ```
 
 GitHub requires cron schedules to live in workflow files, so edit those lines if the cloud schedule needs to change.
+The minutes intentionally avoid exact hour and quarter-hour boundaries because GitHub scheduled workflows can be delayed or dropped during high-load times.
 
 ## Standing Gap Formula
 
