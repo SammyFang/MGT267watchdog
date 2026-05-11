@@ -6,6 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "monitor": "node src/monitor.js --once",
+    "test-email": "node src/monitor.js --test-email",
     "watch": "node src/monitor.js --watch"
   },
   "dependencies": {

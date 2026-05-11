@@ -75,6 +75,19 @@ Local test without sending mail:
 $env:EMAIL_DRY_RUN='1'; npm run monitor
 ```
 
+Send the two email templates without sending mail locally:
+
+```powershell
+$env:EMAIL_DRY_RUN='1'; npm run test-email
+```
+
+The `Email Smoke Test` GitHub workflow sends two real test emails with repository secrets:
+
+- `[TEST] hourly report`
+- `[TEST] 5-minute warning`
+
+It can be run manually from GitHub Actions. It also runs on push only when the commit message contains `[email-test]`.
+
 Continuous local loop:
 
 ```powershell

@@ -173,6 +173,15 @@ function stripTags(html) {
   return decodeHtml(html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "));
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function extractPlotLines(html) {
   const linePattern =
     /\{label:\s*'([^']+)'\s*,\s*name:\s*'([^']+)'\s*,\s*points:\s*'([^']*)'/g;
@@ -521,9 +530,26 @@ function buildStandingLines(standingReport) {
   );
 }
 
-function buildReportText(config, record, standingReport) {
+function buildEmailSubject(config, record, options = {}) {
+  const testPrefix = options.test ? "[TEST] " : "";
+  const alertPrefix = record.inventoryAlert ? "ALERT " : "";
+
+  if (options.kind === "warning") {
+    const minutes = options.warningMinutes || config.monitor.warning_minutes || 5;
+    return `${testPrefix}${config.email.subject_prefix}: ${minutes}-minute warning - ${record.targetTeam} ${record.targetCash} day ${record.dashboardDay}`;
+  }
+
+  return `${testPrefix}${alertPrefix}${config.email.subject_prefix}: hourly report - ${record.targetTeam} ${record.targetCash} day ${record.dashboardDay}`;
+}
+
+function buildReportText(config, record, standingReport, options = {}) {
+  const reportName =
+    options.kind === "warning"
+      ? `${options.warningMinutes || config.monitor.warning_minutes || 5}-minute warning`
+      : "hourly report";
+
   return [
-    `${config.email.subject_prefix} hourly report`,
+    `${options.test ? "[TEST] " : ""}${config.email.subject_prefix} ${reportName}`,
     "",
     `Checked at: ${record.checkedAtLocal} (${config.crawl.timezone})`,
     `Target team: ${record.targetTeam}`,
@@ -544,7 +570,94 @@ function buildReportText(config, record, standingReport) {
   ].join("\n");
 }
 
-async function sendReportEmail(config, record, standingReport) {
+function buildCard(label, value, accent = "#2563eb") {
+  return [
+    '<td style="padding:8px;width:25%;">',
+    `<div style="border:1px solid #d8dee9;border-left:4px solid ${accent};border-radius:8px;padding:12px;background:#ffffff;">`,
+    `<div style="font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">${escapeHtml(label)}</div>`,
+    `<div style="font-size:20px;font-weight:700;color:#0f172a;margin-top:4px;">${escapeHtml(value)}</div>`,
+    "</div>",
+    "</td>",
+  ].join("");
+}
+
+function buildStandingRowsHtml(standingReport) {
+  return standingReport.rows
+    .map((row) => {
+      const target = row.team === standingReport.target.team;
+      const gapColor =
+        row.gapAmount > 0 ? "#047857" : row.gapAmount < 0 ? "#b91c1c" : "#334155";
+      const background = target ? "#eef2ff" : "#ffffff";
+
+      return [
+        `<tr style="background:${background};">`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(row.rank)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;font-weight:${target ? "700" : "500"};">${escapeHtml(row.team)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(row.cash)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;color:${gapColor};font-weight:700;">${escapeHtml(row.gapAmountText)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;color:${gapColor};font-weight:700;">${escapeHtml(row.gapPercentText)}</td>`,
+        "</tr>",
+      ].join("");
+    })
+    .join("");
+}
+
+function buildReportHtml(config, record, standingReport, options = {}) {
+  const isWarning = options.kind === "warning";
+  const minutes = options.warningMinutes || config.monitor.warning_minutes || 5;
+  const title = isWarning
+    ? `${minutes}-minute warning`
+    : "Hourly monitoring report";
+  const eyebrow = options.test ? "Test email" : "Supply Chain Watchdog";
+  const alertText = record.inventoryAlert
+    ? `Warehouse inventory is at or above ${record.threshold}.`
+    : `Warehouse inventory is below ${record.threshold}.`;
+  const bannerColor = isWarning || record.inventoryAlert ? "#b91c1c" : "#1d4ed8";
+  const bannerBg = isWarning || record.inventoryAlert ? "#fef2f2" : "#eff6ff";
+
+  return [
+    '<!doctype html>',
+    '<html><body style="margin:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;color:#0f172a;">',
+    '<div style="max-width:820px;margin:0 auto;padding:24px;">',
+    '<div style="background:#ffffff;border:1px solid #d8dee9;border-radius:12px;overflow:hidden;">',
+    `<div style="background:${bannerColor};color:#ffffff;padding:18px 22px;">`,
+    `<div style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;opacity:.9;">${escapeHtml(eyebrow)}</div>`,
+    `<div style="font-size:24px;font-weight:700;margin-top:4px;">${escapeHtml(title)}</div>`,
+    `<div style="font-size:13px;margin-top:6px;opacity:.95;">${escapeHtml(record.checkedAtLocal)} (${escapeHtml(config.crawl.timezone)})</div>`,
+    "</div>",
+    `<div style="padding:16px 22px;background:${bannerBg};border-bottom:1px solid #d8dee9;color:${bannerColor};font-weight:700;">${escapeHtml(alertText)}</div>`,
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:14px;">',
+    "<tr>",
+    buildCard("Target team", record.targetTeam),
+    buildCard("Rank", record.targetRank),
+    buildCard("Cash", record.targetCash, "#047857"),
+    buildCard("Day", record.dashboardDay, "#7c3aed"),
+    "</tr><tr>",
+    buildCard("Warehouse inventory", record.warehouseInventory, record.inventoryAlert ? "#b91c1c" : "#0f766e"),
+    buildCard("Inventory day", record.warehouseDay),
+    buildCard("Threshold", record.threshold, "#ea580c"),
+    buildCard("Report type", isWarning ? `${minutes}-minute warning` : "hourly"),
+    "</tr>",
+    "</table>",
+    '<div style="padding:0 22px 18px;">',
+    '<div style="font-size:13px;color:#475569;margin-bottom:10px;">Gap formula: <b>target_cash - team_cash</b>; gap percent: <b>gap_amount / team_cash * 100</b>.</div>',
+    '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #d8dee9;border-radius:8px;overflow:hidden;font-size:14px;">',
+    '<thead><tr style="background:#e2e8f0;color:#334155;">',
+    '<th style="padding:9px;text-align:right;">Rank</th>',
+    '<th style="padding:9px;text-align:left;">Team</th>',
+    '<th style="padding:9px;text-align:right;">Cash</th>',
+    '<th style="padding:9px;text-align:right;">Gap amount</th>',
+    '<th style="padding:9px;text-align:right;">Gap percent</th>',
+    "</tr></thead>",
+    `<tbody>${buildStandingRowsHtml(standingReport)}</tbody>`,
+    "</table>",
+    "</div>",
+    '<div style="padding:12px 22px;background:#f8fafc;color:#64748b;font-size:12px;border-top:1px solid #d8dee9;">Generated by MGT267 Watchdog.</div>',
+    "</div></div></body></html>",
+  ].join("");
+}
+
+async function sendReportEmail(config, record, standingReport, options = {}) {
   if (!isEmailEnabled(config)) {
     console.log("Email report skipped because email is disabled");
     return false;
@@ -556,9 +669,9 @@ async function sendReportEmail(config, record, standingReport) {
     throw new Error("Email report is enabled, but email.recipients is empty");
   }
 
-  const alertPrefix = record.inventoryAlert ? "ALERT " : "";
-  const subject = `${alertPrefix}${config.email.subject_prefix}: ${record.targetTeam} ${record.targetCash} day ${record.dashboardDay}`;
-  const text = buildReportText(config, record, standingReport);
+  const subject = buildEmailSubject(config, record, options);
+  const text = buildReportText(config, record, standingReport, options);
+  const html = buildReportHtml(config, record, standingReport, options);
 
   if (isEmailDryRun()) {
     console.log("EMAIL_DRY_RUN=1, email report not sent.");
@@ -574,6 +687,7 @@ async function sendReportEmail(config, record, standingReport) {
     to: recipients.join(","),
     subject,
     text,
+    html,
   });
 
   return true;
@@ -650,6 +764,30 @@ async function crawl(config) {
   };
 }
 
+function createRecord(config, dashboard, inventoryTable, standingReport, options = {}) {
+  const checkedAt = options.checkedAt || new Date().toISOString();
+  const threshold = Number(config.monitor.warehouse_inventory_threshold);
+  const currentInventory = inventoryTable.latestWarehouse.inventory;
+  const inventoryAlert =
+    options.inventoryAlertOverride ?? currentInventory >= threshold;
+
+  return {
+    checkedAt,
+    checkedAtLocal: localizedTime(checkedAt, config.crawl.timezone),
+    cash: dashboard.cash,
+    cashNumber: extractCashNumber(dashboard.cash),
+    dashboardDay: dashboard.day,
+    warehouseInventory: currentInventory,
+    warehouseDay: inventoryTable.latestWarehouse.day,
+    targetTeam: standingReport.target.team,
+    targetRank: standingReport.target.rank,
+    targetCash: standingReport.target.cash,
+    targetCashNumber: standingReport.target.cashNumber,
+    threshold,
+    inventoryAlert,
+  };
+}
+
 async function runOnce(config) {
   const statePath = path.resolve(process.cwd(), config.output.latest_json);
   const historyPath = path.resolve(process.cwd(), config.output.history_csv);
@@ -665,27 +803,11 @@ async function runOnce(config) {
 
   const previousState = readJson(statePath, {});
   const { dashboard, inventoryTable, standingReport } = await crawl(config);
-  const threshold = Number(config.monitor.warehouse_inventory_threshold);
-  const currentInventory = inventoryTable.latestWarehouse.inventory;
   const checkedAt = new Date().toISOString();
-  const inventoryAlert = currentInventory >= threshold;
-  let emailSent = false;
-
-  const record = {
+  const record = createRecord(config, dashboard, inventoryTable, standingReport, {
     checkedAt,
-    checkedAtLocal: localizedTime(checkedAt, config.crawl.timezone),
-    cash: dashboard.cash,
-    cashNumber: extractCashNumber(dashboard.cash),
-    dashboardDay: dashboard.day,
-    warehouseInventory: currentInventory,
-    warehouseDay: inventoryTable.latestWarehouse.day,
-    targetTeam: standingReport.target.team,
-    targetRank: standingReport.target.rank,
-    targetCash: standingReport.target.cash,
-    targetCashNumber: standingReport.target.cashNumber,
-    threshold,
-    inventoryAlert,
-  };
+  });
+  let emailSent = false;
 
   if (config.monitor.send_report_every_run) {
     emailSent = await sendReportEmail(config, record, standingReport);
@@ -703,14 +825,14 @@ async function runOnce(config) {
         last_cash: dashboard.cash,
         last_cash_number: record.cashNumber,
         last_dashboard_day: dashboard.day,
-        last_warehouse_inventory: currentInventory,
+        last_warehouse_inventory: record.warehouseInventory,
         last_warehouse_day: inventoryTable.latestWarehouse.day,
         last_target_team: standingReport.target.team,
         last_target_rank: standingReport.target.rank,
         last_target_cash: standingReport.target.cash,
         last_target_cash_number: standingReport.target.cashNumber,
-        last_threshold: threshold,
-        last_inventory_alert: inventoryAlert,
+        last_threshold: record.threshold,
+        last_inventory_alert: record.inventoryAlert,
         last_email_sent_at: emailSent
           ? checkedAt
           : previousState.last_email_sent_at || null,
@@ -730,10 +852,10 @@ async function runOnce(config) {
   console.log(`Target team: ${standingReport.target.team}`);
   console.log(`Target rank: ${standingReport.target.rank}`);
   console.log(`Target cash: ${standingReport.target.cash}`);
-  console.log(`Warehouse inventory: ${currentInventory}`);
+  console.log(`Warehouse inventory: ${record.warehouseInventory}`);
   console.log(`Warehouse inventory day: ${inventoryTable.latestWarehouse.day}`);
-  console.log(`Threshold: ${threshold}`);
-  console.log(`Inventory alert: ${inventoryAlert ? "yes" : "no"}`);
+  console.log(`Threshold: ${record.threshold}`);
+  console.log(`Inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
   console.log(`Email sent: ${emailSent ? "yes" : "no"}`);
   console.log(`State: ${statePath}`);
   console.log(`History: ${historyPath}`);
@@ -757,6 +879,37 @@ async function runWatch(config) {
   }
 }
 
+async function sendTestEmails(config) {
+  const { dashboard, inventoryTable, standingReport } = await crawl(config);
+  const checkedAt = new Date().toISOString();
+  const baseRecord = createRecord(config, dashboard, inventoryTable, standingReport, {
+    checkedAt,
+  });
+  const warningRecord = {
+    ...baseRecord,
+    inventoryAlert: true,
+  };
+  const warningMinutes = Number(config.monitor.warning_minutes || 5);
+
+  const hourlySent = await sendReportEmail(config, baseRecord, standingReport, {
+    kind: "hourly",
+    test: true,
+  });
+  const warningSent = await sendReportEmail(config, warningRecord, standingReport, {
+    kind: "warning",
+    test: true,
+    warningMinutes,
+  });
+
+  console.log("Test email summary:");
+  console.log(`Hourly report email sent: ${hourlySent ? "yes" : "no"}`);
+  console.log(`${warningMinutes}-minute warning email sent: ${warningSent ? "yes" : "no"}`);
+  console.log(`Target team: ${baseRecord.targetTeam}`);
+  console.log(`Target cash: ${baseRecord.targetCash}`);
+  console.log(`Dashboard day: ${baseRecord.dashboardDay}`);
+  console.log(`Warehouse inventory: ${baseRecord.warehouseInventory}`);
+}
+
 async function main() {
   const config = readJson(CONFIG_PATH);
 
@@ -766,6 +919,11 @@ async function main() {
 
   if (process.argv.includes("--watch")) {
     await runWatch(config);
+    return;
+  }
+
+  if (process.argv.includes("--test-email")) {
+    await sendTestEmails(config);
     return;
   }
 
