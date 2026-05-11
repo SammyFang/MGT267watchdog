@@ -21,9 +21,6 @@ Most settings are in `monitor_config.json`:
 Configured recipients:
 
 - `950154@gmail.com`
-- `wgong009@ucr.edu`
-- `hhuan238@ucr.edu`
-- `yfang097@ucr.edu`
 
 GitHub Actions schedules:
 
