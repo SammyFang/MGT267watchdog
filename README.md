@@ -14,6 +14,7 @@ Most settings are in `monitor_config.json`:
 - `monitor.metric_thresholds`: optional min/max alert thresholds for the hourly report's warehouse, factory, and headquarters metrics.
 - `ai.enabled`, `ai.model`, `ai.api_key_env`: Gemini recommendation settings.
 - `email.recipients`: notification recipient list.
+- `email.attach_excel`: attach the full data workbook to report emails.
 - `email.footer`: email footer text and URL.
 - `crawl.plot_sources`: warehouse, factory, and headquarters plot URLs included in hourly reports.
 
@@ -138,6 +139,7 @@ Hourly reports include:
 - factory WIP
 - headquarters demand, lost demand, and cash balance
 - current source values plus 1-hour change and 1-hour change rate when a previous hourly state exists
+- one `.xlsx` attachment with every scraped Data table in separate tabs, plus summary and standing tabs
 
 The `Email Smoke Test` GitHub workflow sends one real test email with repository secrets:
 
@@ -158,3 +160,4 @@ Output files are written to `.monitor-state/`:
 - `warehouse_inventory_latest.csv`
 - `standing_gaps_latest.csv`
 - `operational_snapshot_latest.csv`
+- `supply_chain_data_latest.xlsx`

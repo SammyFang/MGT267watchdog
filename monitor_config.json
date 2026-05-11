@@ -112,6 +112,7 @@
       "yfang097@ucr.edu"
     ],
     "subject_prefix": "MGT267 Warehouse Watchdog",
+    "attach_excel": true,
     "footer": {
       "text": "Developed by Yung-Sian Fang",
       "url": "https://sammyfang.tw"
@@ -123,6 +124,7 @@
     "history_csv": ".monitor-state/history.csv",
     "warehouse_inventory_csv": ".monitor-state/warehouse_inventory_latest.csv",
     "standing_gaps_csv": ".monitor-state/standing_gaps_latest.csv",
-    "operational_snapshot_csv": ".monitor-state/operational_snapshot_latest.csv"
+    "operational_snapshot_csv": ".monitor-state/operational_snapshot_latest.csv",
+    "data_workbook_xlsx": ".monitor-state/supply_chain_data_latest.xlsx"
   }
 }

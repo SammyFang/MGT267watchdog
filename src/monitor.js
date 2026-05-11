@@ -4,6 +4,7 @@ const path = require("node:path");
 require("dotenv").config();
 
 const nodemailer = require("nodemailer");
+const ExcelJS = require("exceljs");
 
 const CONFIG_PATH = path.resolve(process.cwd(), "monitor_config.json");
 
@@ -218,6 +219,14 @@ function extractAxisLabel(html) {
   return match ? decodeHtml(match[1]) : "day";
 }
 
+function plotSeriesLabel(line) {
+  return (
+    String(line.label || "").trim() ||
+    String(line.name || "").trim() ||
+    "value"
+  );
+}
+
 function extractDecimalRule(html, key, fallbackPrecision) {
   const blockMatch = html.match(
     new RegExp(`['"]${key}['"]\\s*:\\s*\\{([\\s\\S]*?)\\}`, "i"),
@@ -271,6 +280,64 @@ function formatByRule(value, rule) {
 function csvValue(value) {
   const text = String(value ?? "");
   return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function safeWorksheetName(name, usedNames) {
+  const cleaned = String(name || "Sheet")
+    .replace(/[:\\/?*[\]]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 31);
+  const base = cleaned || "Sheet";
+  let candidate = base;
+  let index = 2;
+
+  while (usedNames.has(candidate.toLowerCase())) {
+    const suffix = ` ${index}`;
+    candidate = `${base.slice(0, 31 - suffix.length)}${suffix}`;
+    index += 1;
+  }
+
+  usedNames.add(candidate.toLowerCase());
+  return candidate;
+}
+
+function safeAttachmentFilename(value) {
+  return String(value || "supply-chain-data")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120);
+}
+
+function dataCell(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  return String(value);
+}
+
+function styleWorksheet(worksheet) {
+  worksheet.views = [{ state: "frozen", ySplit: 1 }];
+  const headerRow = worksheet.getRow(1);
+  headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
+  headerRow.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF1D4ED8" },
+  };
+  headerRow.alignment = { vertical: "middle" };
+
+  for (const column of worksheet.columns) {
+    let maxLength = 10;
+
+    column.eachCell({ includeEmpty: true }, (cell) => {
+      const length = String(cell.value ?? "").length;
+      maxLength = Math.max(maxLength, length);
+    });
+
+    column.width = Math.min(Math.max(maxLength + 2, 12), 28);
+  }
 }
 
 function buildPlotRows(lines, xRule, yRule) {
@@ -327,7 +394,7 @@ function buildPlotRows(lines, xRule, yRule) {
 
 function parseWarehouseInventoryTable(html) {
   const lines = extractPlotLines(html);
-  const header = [extractAxisLabel(html), ...lines.map((line) => line.label)];
+  const header = [extractAxisLabel(html), ...lines.map(plotSeriesLabel)];
   const rows = buildPlotRows(
     lines,
     extractDecimalRule(html, "x-data", 3),
@@ -404,7 +471,7 @@ function parsePlotSnapshot(html, source) {
       key: metricKey(source.id, line.name || line.label),
       section: source.section,
       plot: source.label,
-      series: line.label.trim() || "value",
+      series: plotSeriesLabel(line),
       day: formatByRule(dayNumber, xRule),
       dayRaw: line.pointTexts[lastIndex],
       value: formatByRule(valueNumber, yRule),
@@ -418,7 +485,7 @@ function parsePlotSnapshot(html, source) {
     section: source.section,
     label: source.label,
     axisLabel: extractAxisLabel(html),
-    header: [extractAxisLabel(html), ...lines.map((line) => line.label)],
+    header: [extractAxisLabel(html), ...lines.map(plotSeriesLabel)],
     rows,
     series,
   };
@@ -515,6 +582,117 @@ function buildOperationalSnapshotCsv(snapshot) {
     header.map(csvValue).join(","),
     ...rows.map((row) => row.map(csvValue).join(",")),
   ].join("\r\n")}\r\n`;
+}
+
+function addSummaryWorksheet(workbook, usedNames, config, record) {
+  const worksheet = workbook.addWorksheet(safeWorksheetName("Summary", usedNames));
+  worksheet.addRow(["Field", "Value"]);
+  worksheet.addRow(["Generated at", record.checkedAtLocal]);
+  worksheet.addRow(["Timezone", config.crawl.timezone]);
+  worksheet.addRow(["Target team", record.targetTeam]);
+  worksheet.addRow(["Target rank", record.targetRank]);
+  worksheet.addRow(["Target cash", record.targetCash]);
+  worksheet.addRow(["Dashboard day", record.dashboardDay]);
+  worksheet.addRow(["Warehouse inventory", dataCell(record.warehouseInventory)]);
+  worksheet.addRow(["Warehouse inventory day", dataCell(record.warehouseDay)]);
+  worksheet.addRow(["Warehouse inventory threshold", dataCell(record.threshold)]);
+  worksheet.addRow(["Inventory alert", record.inventoryAlert ? "yes" : "no"]);
+  styleWorksheet(worksheet);
+}
+
+function addStandingWorksheet(workbook, usedNames, standingReport) {
+  const worksheet = workbook.addWorksheet(
+    safeWorksheetName("Team Standing", usedNames),
+  );
+  worksheet.addRow([
+    "rank",
+    "team",
+    "cash",
+    "cash_number",
+    "gap_amount_target_minus_team",
+    "gap_percent_vs_team_cash",
+  ]);
+
+  for (const row of standingReport.rows) {
+    worksheet.addRow([
+      dataCell(row.rank),
+      row.team,
+      row.cash,
+      dataCell(row.cashNumber),
+      row.gapAmountText,
+      row.gapPercentText,
+    ]);
+  }
+
+  styleWorksheet(worksheet);
+}
+
+function addPlotDataWorksheet(workbook, usedNames, plot) {
+  const worksheet = workbook.addWorksheet(
+    safeWorksheetName(`${plot.section} ${plot.label}`, usedNames),
+  );
+
+  worksheet.addRow(plot.header.map(dataCell));
+
+  for (const row of plot.rows) {
+    worksheet.addRow(row.source.map(dataCell));
+  }
+
+  styleWorksheet(worksheet);
+}
+
+function dataWorkbookFilename(record, options = {}) {
+  const prefix = options.test ? "test-" : "";
+  const day = safeAttachmentFilename(record.dashboardDay);
+  const team = safeAttachmentFilename(record.targetTeam);
+
+  return `${prefix}mgt267-data-${team}-day-${day}.xlsx`;
+}
+
+async function buildDataWorkbookBuffer(config, record, standingReport, plotSnapshots) {
+  if (!plotSnapshots || plotSnapshots.length === 0) {
+    return null;
+  }
+
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "MGT267 Watchdog";
+  workbook.created = new Date(record.checkedAt);
+  workbook.modified = new Date(record.checkedAt);
+  workbook.calcProperties.fullCalcOnLoad = true;
+  const usedNames = new Set();
+
+  addSummaryWorksheet(workbook, usedNames, config, record);
+
+  for (const plot of plotSnapshots) {
+    addPlotDataWorksheet(workbook, usedNames, plot);
+  }
+
+  addStandingWorksheet(workbook, usedNames, standingReport);
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+}
+
+async function writeDataWorkbookFile(
+  config,
+  record,
+  standingReport,
+  plotSnapshots,
+  filePath,
+) {
+  const buffer = await buildDataWorkbookBuffer(
+    config,
+    record,
+    standingReport,
+    plotSnapshots,
+  );
+
+  if (!buffer) {
+    return false;
+  }
+
+  fs.writeFileSync(filePath, buffer);
+  return true;
 }
 
 function parseStandingTable(html, targetTeam) {
@@ -1361,11 +1539,35 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
   const subject = buildEmailSubject(config, record, renderOptions);
   const text = buildReportText(config, record, standingReport, renderOptions);
   const html = buildReportHtml(config, record, standingReport, renderOptions);
+  const attachments = [];
+
+  if (config.email.attach_excel !== false && options.plotSnapshots?.length) {
+    const workbookBuffer = await buildDataWorkbookBuffer(
+      config,
+      record,
+      standingReport,
+      options.plotSnapshots,
+    );
+
+    if (workbookBuffer) {
+      attachments.push({
+        filename: dataWorkbookFilename(record, options),
+        content: workbookBuffer,
+        contentType:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+    }
+  }
 
   if (isEmailDryRun()) {
     console.log("EMAIL_DRY_RUN=1, email report not sent.");
     console.log(`Dry-run recipients: ${recipients.join(", ")}`);
     console.log(`Dry-run subject: ${subject}`);
+    console.log(
+      `Dry-run Excel attachment: ${
+        attachments.length > 0 ? attachments[0].filename : "none"
+      }`,
+    );
     console.log(`Recommendations source: ${recommendations.source}`);
     for (const item of recommendations.items) {
       console.log(`- ${item}`);
@@ -1381,6 +1583,7 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
     subject,
     text,
     html,
+    attachments,
   });
 
   return true;
@@ -1516,6 +1719,10 @@ async function runOnce(config) {
     process.cwd(),
     config.output.operational_snapshot_csv,
   );
+  const dataWorkbookPath = path.resolve(
+    process.cwd(),
+    config.output.data_workbook_xlsx,
+  );
   ensureDir(path.resolve(process.cwd(), config.output.state_dir));
 
   const previousState = readJson(statePath, {});
@@ -1534,6 +1741,7 @@ async function runOnce(config) {
   if (config.monitor.send_report_every_run) {
     emailSent = await sendReportEmail(config, record, standingReport, {
       operationalSnapshot,
+      plotSnapshots,
     });
   }
 
@@ -1543,6 +1751,13 @@ async function runOnce(config) {
     operationalCsvPath,
     buildOperationalSnapshotCsv(operationalSnapshot),
     "utf8",
+  );
+  const workbookWritten = await writeDataWorkbookFile(
+    config,
+    record,
+    standingReport,
+    plotSnapshots,
+    dataWorkbookPath,
   );
   appendHistory(historyPath, { ...record, emailSent });
   fs.writeFileSync(
@@ -1591,6 +1806,9 @@ async function runOnce(config) {
   console.log(`History: ${historyPath}`);
   console.log(`Standing gaps: ${standingCsvPath}`);
   console.log(`Operational snapshot: ${operationalCsvPath}`);
+  console.log(
+    `Excel data workbook: ${workbookWritten ? dataWorkbookPath : "not written"}`,
+  );
 }
 
 function sleep(ms) {
@@ -1630,6 +1848,7 @@ async function sendTestEmails(config) {
     kind: "hourly",
     test: true,
     operationalSnapshot,
+    plotSnapshots,
   });
 
   console.log("Test email summary:");
@@ -1650,10 +1869,31 @@ async function sendWarningEmail(config) {
   let emailSent = false;
 
   if (record.inventoryAlert) {
-    emailSent = await sendReportEmail(config, record, standingReport, {
-      kind: "warning",
-      warningMinutes,
-    });
+    const fullCrawl = await crawl(config);
+    const fullRecord = createRecord(
+      config,
+      fullCrawl.dashboard,
+      fullCrawl.inventoryTable,
+      fullCrawl.standingReport,
+    );
+    const operationalSnapshot = buildOperationalSnapshot(
+      fullCrawl.plotSnapshots,
+      {},
+    );
+
+    if (fullRecord.inventoryAlert) {
+      emailSent = await sendReportEmail(
+        config,
+        fullRecord,
+        fullCrawl.standingReport,
+        {
+          kind: "warning",
+          warningMinutes,
+          operationalSnapshot,
+          plotSnapshots: fullCrawl.plotSnapshots,
+        },
+      );
+    }
   }
 
   console.log(`${warningMinutes}-minute warning email summary:`);
