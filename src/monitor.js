@@ -1246,10 +1246,14 @@ async function sendWarningEmail(config) {
   });
   const warningMinutes = Number(config.monitor.warning_minutes || 15);
   const record = createRecord(config, dashboard, inventoryTable, standingReport);
-  const emailSent = await sendReportEmail(config, record, standingReport, {
-    kind: "warning",
-    warningMinutes,
-  });
+  let emailSent = false;
+
+  if (record.inventoryAlert) {
+    emailSent = await sendReportEmail(config, record, standingReport, {
+      kind: "warning",
+      warningMinutes,
+    });
+  }
 
   console.log(`${warningMinutes}-minute warning email summary:`);
   console.log(`Email sent: ${emailSent ? "yes" : "no"}`);

@@ -4,11 +4,6 @@ on:
   schedule:
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
-    inputs:
-      chain:
-        description: "Continue 15-minute self-dispatch loop"
-        required: false
-        default: "true"
   push:
     branches:
       - main
@@ -21,7 +16,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: supply-chain-warning
@@ -31,7 +25,7 @@ jobs:
   warning-email:
     if: github.event_name != 'push' || contains(github.event.head_commit.message, '[warning-now]')
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
@@ -46,7 +40,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Send 15-minute warning email
+      - name: Check inventory and send threshold warning
         run: npm run warning-email
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
@@ -58,11 +52,3 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
-
-      - name: Queue next 15-minute warning run
-        if: success() && (github.event_name != 'workflow_dispatch' || github.event.inputs.chain != 'false')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          sleep 900
-          gh workflow run warning.yml --ref main -f chain=true
