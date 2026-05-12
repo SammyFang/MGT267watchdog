@@ -33,11 +33,15 @@ GitHub Actions schedules:
 
 # .github/workflows/monitor.yml
 - cron: "11,41 * * * *"
+
+# .github/workflows/heartbeat.yml
+repository_dispatch: watchdog-heartbeat
 ```
 
 GitHub requires cron schedules to live in workflow files, so edit those lines if the cloud schedule needs to change.
 The hourly workflow attempts twice per hour as a backup; `monitor.report_min_interval_minutes` throttles actual report emails so normal delivery remains about once per hour.
 The minutes intentionally avoid exact hour and quarter-hour boundaries because GitHub scheduled workflows can be delayed or dropped during high-load times.
+The heartbeat workflow starts immediately with `[heartbeat-now]`, checks warning rules, runs the hourly report throttle, waits 15 minutes, then dispatches the next heartbeat run.
 Push with `[hourly-now]` or `[warning-now]` starts the corresponding workflow immediately.
 The warning workflow checks every 15 minutes, but only sends email when a `monitor.alert_rules` entry with the `warning` channel is in `ALERT`.
 
