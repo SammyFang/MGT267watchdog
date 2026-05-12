@@ -36,6 +36,9 @@ GitHub Actions schedules:
 
 # .github/workflows/heartbeat.yml
 repository_dispatch: watchdog-heartbeat
+
+# .github/workflows/manual-export.yml
+workflow_dispatch only
 ```
 
 GitHub requires cron schedules to live in workflow files, so edit those lines if the cloud schedule needs to change.
@@ -44,6 +47,18 @@ The minutes intentionally avoid exact hour and quarter-hour boundaries because G
 The heartbeat workflow starts immediately with `[heartbeat-now]`, checks warning rules, runs the hourly report throttle, waits 15 minutes, then dispatches the next heartbeat run.
 Push with `[hourly-now]` or `[warning-now]` starts the corresponding workflow immediately.
 The warning workflow checks every 15 minutes, but only sends email when a `monitor.alert_rules` entry with the `warning` channel is in `ALERT`.
+
+## Manual Excel Export
+
+To download the latest full crawler workbook without sending email or changing the running schedule:
+
+1. Open GitHub `Actions`.
+2. Select `Manual Data Export`.
+3. Click `Run workflow`.
+4. Open the completed run.
+5. Download the `latest-crawl-data` artifact.
+
+The artifact includes `supply_chain_data_latest.xlsx` plus the latest JSON/CSV outputs. This workflow does not restore or save the scheduled monitor cache.
 
 ## Standing Gap Formula
 

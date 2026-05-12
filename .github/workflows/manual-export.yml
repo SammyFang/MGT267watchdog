@@ -1,0 +1,48 @@
+name: Manual Data Export
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Crawl latest data and build workbook
+        run: npm run monitor
+        env:
+          SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
+          SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
+          SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
+          EMAIL_ENABLED: "false"
+          EMAIL_DRY_RUN: "true"
+
+      - name: Upload latest data workbook
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-crawl-data
+          path: |
+            .monitor-state/supply_chain_data_latest.xlsx
+            .monitor-state/latest.json
+            .monitor-state/warehouse_inventory_latest.csv
+            .monitor-state/standing_gaps_latest.csv
+            .monitor-state/operational_snapshot_latest.csv
+          if-no-files-found: error
+          include-hidden-files: true
