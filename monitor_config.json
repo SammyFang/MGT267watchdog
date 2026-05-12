@@ -55,7 +55,7 @@
     "target_team": "group7",
     "warehouse_inventory_threshold": 450,
     "warning_minutes": 15,
-    "send_report_every_run": true,
+    "send_report_every_run": false,
     "report_min_interval_minutes": 50,
     "gap_percentage_formula": "(target_cash - team_cash) / team_cash * 100",
     "alert_rules": [
@@ -187,7 +187,7 @@
     "max_suggestions": 4
   },
   "email": {
-    "enabled": true,
+    "enabled": false,
     "recipients": [
       "950154@gmail.com",
       "wgong009@ucr.edu",
