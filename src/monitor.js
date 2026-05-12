@@ -1030,6 +1030,51 @@ function isEmailEnabled(config) {
   return config.email.enabled;
 }
 
+function isTruthyEnv(name) {
+  return ["1", "true", "yes"].includes(optionalEnv(name, "false").toLowerCase());
+}
+
+function shouldSendReportNow(config, previousState) {
+  if (isTruthyEnv("FORCE_EMAIL_REPORT")) {
+    return {
+      send: true,
+      reason: "forced by workflow trigger",
+    };
+  }
+
+  const intervalMinutes = Number(config.monitor.report_min_interval_minutes || 0);
+
+  if (!Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {
+    return {
+      send: true,
+      reason: "no report interval throttle configured",
+    };
+  }
+
+  if (!previousState.last_email_sent_at) {
+    return {
+      send: true,
+      reason: "no previous email timestamp",
+    };
+  }
+
+  const lastSentAt = new Date(previousState.last_email_sent_at).getTime();
+
+  if (!Number.isFinite(lastSentAt)) {
+    return {
+      send: true,
+      reason: "invalid previous email timestamp",
+    };
+  }
+
+  const elapsedMinutes = (Date.now() - lastSentAt) / 60000;
+
+  return {
+    send: elapsedMinutes >= intervalMinutes,
+    reason: `last email ${elapsedMinutes.toFixed(1)} minutes ago; minimum interval ${intervalMinutes} minutes`,
+  };
+}
+
 function normalizeRecipients(recipients) {
   return [...new Set((recipients || []).map((item) => String(item).trim()).filter(Boolean))];
 }
@@ -2294,14 +2339,17 @@ async function runOnce(config) {
   );
   const watchlist = buildWatchlist(config, metricCatalog, "hourly");
   let emailSent = false;
+  const reportDecision = shouldSendReportNow(config, previousState);
 
-  if (config.monitor.send_report_every_run) {
+  if (config.monitor.send_report_every_run && reportDecision.send) {
     emailSent = await sendReportEmail(config, record, standingReport, {
       operationalSnapshot,
       plotSnapshots,
       metricCatalog,
       watchlist,
     });
+  } else if (config.monitor.send_report_every_run) {
+    console.log(`Email report skipped: ${reportDecision.reason}`);
   }
 
   fs.writeFileSync(inventoryCsvPath, buildWarehouseCsv(inventoryTable), "utf8");
@@ -2366,6 +2414,7 @@ async function runOnce(config) {
   console.log(`Warehouse inventory day: ${inventoryTable.latestWarehouse.day}`);
   console.log(`Threshold: ${record.threshold}`);
   console.log(`Inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
+  console.log(`Report decision: ${reportDecision.reason}`);
   console.log(`Email sent: ${emailSent ? "yes" : "no"}`);
   console.log(`State: ${statePath}`);
   console.log(`History: ${historyPath}`);

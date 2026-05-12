@@ -11,6 +11,7 @@ Most settings are in `monitor_config.json`:
 - `monitor.warehouse_inventory_threshold`: inventory alert threshold, currently `450`.
 - `monitor.warning_minutes`: warning email interval label, currently `15`.
 - `monitor.send_report_every_run`: send one email each scheduled run.
+- `monitor.report_min_interval_minutes`: minimum time between scheduled hourly report emails, currently `50`.
 - `monitor.alert_rules`: editable watchlist rules for stockout risk, lost demand, days of cover, shipment coverage, and cash lead.
 - `monitor.metric_thresholds`: optional min/max alert thresholds for the hourly report's warehouse, factory, and headquarters metrics.
 - `ai.enabled`, `ai.model`, `ai.api_key_env`: Gemini recommendation settings.
@@ -31,10 +32,11 @@ GitHub Actions schedules:
 - cron: "7,22,37,52 * * * *"
 
 # .github/workflows/monitor.yml
-- cron: "11 * * * *"
+- cron: "11,41 * * * *"
 ```
 
 GitHub requires cron schedules to live in workflow files, so edit those lines if the cloud schedule needs to change.
+The hourly workflow attempts twice per hour as a backup; `monitor.report_min_interval_minutes` throttles actual report emails so normal delivery remains about once per hour.
 The minutes intentionally avoid exact hour and quarter-hour boundaries because GitHub scheduled workflows can be delayed or dropped during high-load times.
 Push with `[hourly-now]` or `[warning-now]` starts the corresponding workflow immediately.
 The warning workflow checks every 15 minutes, but only sends email when a `monitor.alert_rules` entry with the `warning` channel is in `ALERT`.

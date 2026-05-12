@@ -2,8 +2,8 @@ name: Supply Chain Watchdog
 
 on:
   schedule:
-    # Edit this cron to change the GitHub-hosted crawl interval.
-    - cron: "11 * * * *"
+    # Backup cadence: the script throttles actual reports to avoid duplicate hourly emails.
+    - cron: "11,41 * * * *"
   workflow_dispatch:
   push:
     branches:
@@ -56,6 +56,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FORCE_EMAIL_REPORT: ${{ github.event_name != 'schedule' }}
 
       - name: Save monitor state
         if: always()
