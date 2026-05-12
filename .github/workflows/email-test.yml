@@ -49,3 +49,4 @@ jobs:
           name: email-test-output
           path: .monitor-state
           if-no-files-found: ignore
+          include-hidden-files: true

@@ -72,3 +72,4 @@ jobs:
           name: monitor-output
           path: .monitor-state
           if-no-files-found: ignore
+          include-hidden-files: true
