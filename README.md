@@ -11,11 +11,13 @@ Most settings are in `monitor_config.json`:
 - `monitor.warehouse_inventory_threshold`: inventory alert threshold, currently `450`.
 - `monitor.warning_minutes`: warning email interval label, currently `15`.
 - `monitor.send_report_every_run`: send one email each scheduled run.
+- `monitor.alert_rules`: editable watchlist rules for stockout risk, lost demand, days of cover, shipment coverage, and cash lead.
 - `monitor.metric_thresholds`: optional min/max alert thresholds for the hourly report's warehouse, factory, and headquarters metrics.
 - `ai.enabled`, `ai.model`, `ai.api_key_env`: Gemini recommendation settings.
 - `email.recipients`: notification recipient list.
 - `email.attach_excel`: attach the full data workbook to report emails.
 - `email.footer`: email footer text and URL.
+- `excel.exponential_smoothing_alpha`: alpha used by the Excel EMA formulas, currently `0.3`.
 - `crawl.plot_sources`: warehouse, factory, and headquarters plot URLs included in hourly reports.
 
 Configured recipients:
@@ -35,7 +37,7 @@ GitHub Actions schedules:
 GitHub requires cron schedules to live in workflow files, so edit those lines if the cloud schedule needs to change.
 The minutes intentionally avoid exact hour and quarter-hour boundaries because GitHub scheduled workflows can be delayed or dropped during high-load times.
 Push with `[hourly-now]` or `[warning-now]` starts the corresponding workflow immediately.
-The warning workflow checks every 15 minutes, but only sends email when WH1 warehouse inventory is at or above the configured threshold.
+The warning workflow checks every 15 minutes, but only sends email when a `monitor.alert_rules` entry with the `warning` channel is in `ALERT`.
 
 ## Standing Gap Formula
 
@@ -96,17 +98,34 @@ The 15-minute warning email threshold is:
 "warehouse_inventory_threshold": 450
 ```
 
-Other hourly report alert thresholds are in `monitor.metric_thresholds`. Set `min` or `max` to a number; leave unused thresholds as `null`.
+Primary watchlist thresholds are in `monitor.alert_rules`. Each rule has:
+
+- `enabled`: set to `false` to disable a rule.
+- `metric`: source metric or derived metric.
+- `operator`: one of `>`, `>=`, `<`, `<=`, `=`.
+- `threshold`: editable numeric threshold.
+- `severity`: `warning` or `critical`.
+- `channels`: `hourly`, `warning`, or both.
+
+The 15-minute workflow only sends when a rule with the `warning` channel is in `ALERT`.
+
+Other legacy hourly report alert thresholds are in `monitor.metric_thresholds`. Set `min` or `max` to a number; leave unused thresholds as `null`.
 
 Available metric keys:
 
 - `warehouse_inventory:mail`
+- `warehouse_inventory:warehouse`
 - `warehouse_inventory:truck`
 - `warehouse_shipments:Calopeia`
 - `factory_wip:Calopeia`
 - `hq_demand:Calopeia`
 - `hq_lost_demand:Calopeia`
 - `hq_cash_balance:value`
+- `derived:days_of_cover`
+- `derived:lost_demand_rate`
+- `derived:shipment_to_demand_ratio`
+- `derived:wip_to_demand_ratio`
+- `derived:cash_lead_percent_vs_nearest`
 
 ## Run Locally
 
@@ -137,6 +156,7 @@ Hourly reports include:
 - headquarters demand, lost demand, and cash balance
 - current source values plus 1-hour change and 1-hour change rate when a previous hourly state exists
 - one `.xlsx` attachment with every scraped Data table in separate tabs, plus summary and standing tabs
+- a `Watchlist` tab and EMA / Delta vs EMA formula columns on each Data tab
 
 The `Email Smoke Test` GitHub workflow sends one real test email with repository secrets:
 

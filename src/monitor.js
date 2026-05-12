@@ -317,6 +317,19 @@ function dataCell(value) {
   return String(value);
 }
 
+function columnLetter(index) {
+  let dividend = index;
+  let column = "";
+
+  while (dividend > 0) {
+    const modulo = (dividend - 1) % 26;
+    column = String.fromCharCode(65 + modulo) + column;
+    dividend = Math.floor((dividend - modulo) / 26);
+  }
+
+  return column;
+}
+
 function styleWorksheet(worksheet) {
   worksheet.views = [{ state: "frozen", ySplit: 1 }];
   const headerRow = worksheet.getRow(1);
@@ -586,6 +599,8 @@ function buildOperationalSnapshotCsv(snapshot) {
 
 function addSummaryWorksheet(workbook, usedNames, config, record) {
   const worksheet = workbook.addWorksheet(safeWorksheetName("Summary", usedNames));
+  const alpha = Number(config.excel?.exponential_smoothing_alpha ?? 0.3);
+
   worksheet.addRow(["Field", "Value"]);
   worksheet.addRow(["Generated at", record.checkedAtLocal]);
   worksheet.addRow(["Timezone", config.crawl.timezone]);
@@ -597,6 +612,61 @@ function addSummaryWorksheet(workbook, usedNames, config, record) {
   worksheet.addRow(["Warehouse inventory day", dataCell(record.warehouseDay)]);
   worksheet.addRow(["Warehouse inventory threshold", dataCell(record.threshold)]);
   worksheet.addRow(["Inventory alert", record.inventoryAlert ? "yes" : "no"]);
+  worksheet.addRow(["EMA alpha", Number.isFinite(alpha) ? alpha : 0.3]);
+  styleWorksheet(worksheet);
+}
+
+function addWatchlistWorksheet(workbook, usedNames, watchlist = []) {
+  if (watchlist.length === 0) {
+    return;
+  }
+
+  const worksheet = workbook.addWorksheet(safeWorksheetName("Watchlist", usedNames));
+  worksheet.addRow([
+    "rule_id",
+    "indicator",
+    "current_value",
+    "unit",
+    "operator",
+    "threshold",
+    "severity",
+    "channels",
+    "status",
+    "message",
+  ]);
+
+  for (const item of watchlist) {
+    const row = worksheet.addRow([
+      item.id,
+      item.label,
+      Number.isFinite(item.current) ? item.current : "",
+      item.unit,
+      item.operator,
+      Number.isFinite(item.threshold) ? item.threshold : "",
+      item.severity,
+      item.channels.join(", "),
+      "",
+      item.message,
+    ]);
+    const rowNumber = row.number;
+    const statusFormula = [
+      `IF(C${rowNumber}="","NO DATA",`,
+      `IF(E${rowNumber}=">=",IF(C${rowNumber}>=F${rowNumber},"ALERT","OK"),`,
+      `IF(E${rowNumber}=">",IF(C${rowNumber}>F${rowNumber},"ALERT","OK"),`,
+      `IF(E${rowNumber}="<=",IF(C${rowNumber}<=F${rowNumber},"ALERT","OK"),`,
+      `IF(E${rowNumber}="<",IF(C${rowNumber}<F${rowNumber},"ALERT","OK"),`,
+      `IF(E${rowNumber}="=",IF(C${rowNumber}=F${rowNumber},"ALERT","OK"),"CHECK"))))))`,
+    ].join("");
+    row.getCell(9).value = {
+      formula: statusFormula,
+      result: item.status,
+    };
+
+    if (item.isAlert) {
+      row.getCell(9).font = { bold: true, color: { argb: "FFB91C1C" } };
+    }
+  }
+
   styleWorksheet(worksheet);
 }
 
@@ -627,15 +697,66 @@ function addStandingWorksheet(workbook, usedNames, standingReport) {
   styleWorksheet(worksheet);
 }
 
-function addPlotDataWorksheet(workbook, usedNames, plot) {
+function addPlotDataWorksheet(workbook, usedNames, plot, alpha = 0.3) {
   const worksheet = workbook.addWorksheet(
     safeWorksheetName(`${plot.section} ${plot.label}`, usedNames),
   );
+  const originalColumnCount = plot.header.length;
+  const seriesHeaders = plot.header.slice(1);
+  const headers = [
+    ...plot.header.map(dataCell),
+    ...seriesHeaders.map((header) => `EMA ${header}`),
+    ...seriesHeaders.map((header) => `Delta vs EMA ${header}`),
+  ];
+  const emaStartColumn = originalColumnCount + 1;
+  const deltaStartColumn = emaStartColumn + seriesHeaders.length;
+  const previousEma = Array(seriesHeaders.length).fill(null);
 
-  worksheet.addRow(plot.header.map(dataCell));
+  worksheet.addRow(headers);
 
   for (const row of plot.rows) {
-    worksheet.addRow(row.source.map(dataCell));
+    const excelRow = worksheet.addRow([
+      ...row.source.map(dataCell),
+      ...Array(seriesHeaders.length * 2).fill(""),
+    ]);
+    const rowNumber = excelRow.number;
+
+    for (let i = 0; i < seriesHeaders.length; i += 1) {
+      const sourceColumn = i + 2;
+      const emaColumn = emaStartColumn + i;
+      const deltaColumn = deltaStartColumn + i;
+      const sourceCell = `${columnLetter(sourceColumn)}${rowNumber}`;
+      const emaCell = `${columnLetter(emaColumn)}${rowNumber}`;
+      const previousEmaCell = `${columnLetter(emaColumn)}${rowNumber - 1}`;
+      const rawValue = row.raw[sourceColumn - 1];
+      const hasValue = Number.isFinite(rawValue);
+      const currentPrevious = previousEma[i];
+      const emaResult = hasValue
+        ? currentPrevious === null
+          ? rawValue
+          : alpha * rawValue + (1 - alpha) * currentPrevious
+        : currentPrevious;
+      const emaFormula =
+        rowNumber === 2
+          ? `IF(${sourceCell}="","",VALUE(${sourceCell}))`
+          : `IF(${sourceCell}="",${previousEmaCell},'Summary'!$B$12*VALUE(${sourceCell})+(1-'Summary'!$B$12)*${previousEmaCell})`;
+      const deltaFormula = `IF(OR(${sourceCell}="",${emaCell}=""),"",VALUE(${sourceCell})-${emaCell})`;
+
+      excelRow.getCell(emaColumn).value = {
+        formula: emaFormula,
+        result: Number.isFinite(emaResult) ? emaResult : "",
+      };
+
+      excelRow.getCell(deltaColumn).value = {
+        formula: deltaFormula,
+        result:
+          hasValue && Number.isFinite(emaResult) ? rawValue - emaResult : "",
+      };
+
+      if (Number.isFinite(emaResult)) {
+        previousEma[i] = emaResult;
+      }
+    }
   }
 
   styleWorksheet(worksheet);
@@ -649,7 +770,13 @@ function dataWorkbookFilename(record, options = {}) {
   return `${prefix}mgt267-data-${team}-day-${day}.xlsx`;
 }
 
-async function buildDataWorkbookBuffer(config, record, standingReport, plotSnapshots) {
+async function buildDataWorkbookBuffer(
+  config,
+  record,
+  standingReport,
+  plotSnapshots,
+  options = {},
+) {
   if (!plotSnapshots || plotSnapshots.length === 0) {
     return null;
   }
@@ -660,11 +787,20 @@ async function buildDataWorkbookBuffer(config, record, standingReport, plotSnaps
   workbook.modified = new Date(record.checkedAt);
   workbook.calcProperties.fullCalcOnLoad = true;
   const usedNames = new Set();
+  const alpha = Number(config.excel?.exponential_smoothing_alpha ?? 0.3);
+  const operationalSnapshot =
+    options.operationalSnapshot || buildOperationalSnapshot(plotSnapshots, {});
+  const metricCatalog =
+    options.metricCatalog ||
+    buildMetricCatalog(config, record, standingReport, operationalSnapshot);
+  const watchlist =
+    options.watchlist || buildWatchlist(config, metricCatalog, "hourly");
 
   addSummaryWorksheet(workbook, usedNames, config, record);
+  addWatchlistWorksheet(workbook, usedNames, watchlist);
 
   for (const plot of plotSnapshots) {
-    addPlotDataWorksheet(workbook, usedNames, plot);
+    addPlotDataWorksheet(workbook, usedNames, plot, Number.isFinite(alpha) ? alpha : 0.3);
   }
 
   addStandingWorksheet(workbook, usedNames, standingReport);
@@ -679,12 +815,14 @@ async function writeDataWorkbookFile(
   standingReport,
   plotSnapshots,
   filePath,
+  options = {},
 ) {
   const buffer = await buildDataWorkbookBuffer(
     config,
     record,
     standingReport,
     plotSnapshots,
+    options,
   );
 
   if (!buffer) {
@@ -952,77 +1090,317 @@ function findOperationalMetric(snapshot, key) {
   return null;
 }
 
-function buildMetricAlertLines(alerts = []) {
+function formatMetricNumber(value, unit = "") {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+
+  if (unit === "%") {
+    return `${value.toFixed(2)}%`;
+  }
+
+  if (unit === "ratio" || unit === "days") {
+    return value.toFixed(2);
+  }
+
+  if (Math.abs(value) >= 1000) {
+    return formatNumber(value, 2);
+  }
+
+  if (Number.isInteger(value)) {
+    return String(value);
+  }
+
+  return value.toFixed(3).replace(/\.?0+$/, "");
+}
+
+function addMetric(metricMap, metric) {
+  if (!metric || !metric.key) {
+    return;
+  }
+
+  metricMap.set(metric.key, {
+    unit: "",
+    source: "crawler",
+    ...metric,
+    valueRaw:
+      metric.valueRaw ?? formatMetricNumber(metric.valueNumber, metric.unit || ""),
+  });
+}
+
+function nearestCompetitor(standingReport) {
+  return standingReport.rows
+    .filter((row) => row.team !== standingReport.target.team)
+    .sort((a, b) => b.cashNumber - a.cashNumber)[0];
+}
+
+function buildMetricCatalog(config, record, standingReport, snapshot) {
+  const metricMap = new Map();
+
+  addMetric(metricMap, {
+    key: "dashboard:cash",
+    label: "Dashboard cash",
+    valueNumber: record.cashNumber,
+    valueRaw: record.cash,
+    unit: "$",
+    source: "dashboard",
+  });
+  addMetric(metricMap, {
+    key: "dashboard:day",
+    label: "Dashboard day",
+    valueNumber: Number(String(record.dashboardDay).replace(/,/g, "")),
+    valueRaw: record.dashboardDay,
+    unit: "day",
+    source: "dashboard",
+  });
+  addMetric(metricMap, {
+    key: "warehouse_inventory:warehouse",
+    label: "Warehouse inventory",
+    valueNumber: record.warehouseInventory,
+    valueRaw: String(record.warehouseInventory),
+    unit: "units",
+    source: "warehouse inventory",
+  });
+
+  if (snapshot) {
+    for (const section of snapshot.sections) {
+      for (const plot of section.plots) {
+        for (const series of plot.series) {
+          addMetric(metricMap, {
+            key: series.key,
+            label: `${section.name} ${plot.label} ${series.series}`,
+            valueNumber: series.valueNumber,
+            valueRaw: series.valueRaw,
+            unit: "units",
+            source: `${section.name} ${plot.label}`,
+            delta: series.delta,
+            deltaText: series.deltaText,
+            changePercent: series.changePercent,
+            changePercentText: series.changePercentText,
+          });
+        }
+      }
+    }
+  }
+
+  const demand = metricMap.get("hq_demand:Calopeia")?.valueNumber;
+  const lostDemand = metricMap.get("hq_lost_demand:Calopeia")?.valueNumber;
+  const shipments = metricMap.get("warehouse_shipments:Calopeia")?.valueNumber;
+  const wip = metricMap.get("factory_wip:Calopeia")?.valueNumber;
+  const competitor = nearestCompetitor(standingReport);
+
+  if (Number.isFinite(demand) && demand > 0) {
+    addMetric(metricMap, {
+      key: "derived:days_of_cover",
+      label: "Days of cover",
+      valueNumber: record.warehouseInventory / demand,
+      unit: "days",
+      source: "derived",
+    });
+  }
+
+  if (Number.isFinite(lostDemand) && Number.isFinite(demand) && demand > 0) {
+    addMetric(metricMap, {
+      key: "derived:lost_demand_rate",
+      label: "Lost demand rate",
+      valueNumber: (lostDemand / demand) * 100,
+      unit: "%",
+      source: "derived",
+    });
+  }
+
+  if (Number.isFinite(shipments) && Number.isFinite(demand) && demand > 0) {
+    addMetric(metricMap, {
+      key: "derived:shipment_to_demand_ratio",
+      label: "Shipment / demand ratio",
+      valueNumber: shipments / demand,
+      unit: "ratio",
+      source: "derived",
+    });
+  }
+
+  if (Number.isFinite(wip) && Number.isFinite(demand) && demand > 0) {
+    addMetric(metricMap, {
+      key: "derived:wip_to_demand_ratio",
+      label: "WIP / demand ratio",
+      valueNumber: wip / demand,
+      unit: "ratio",
+      source: "derived",
+    });
+  }
+
+  if (competitor && Number.isFinite(competitor.cashNumber) && competitor.cashNumber !== 0) {
+    addMetric(metricMap, {
+      key: "derived:cash_lead_percent_vs_nearest",
+      label: "Cash lead vs nearest competitor",
+      valueNumber:
+        ((standingReport.target.cashNumber - competitor.cashNumber) /
+          competitor.cashNumber) *
+        100,
+      unit: "%",
+      source: `standing vs ${competitor.team}`,
+    });
+  }
+
+  return metricMap;
+}
+
+function compareRule(value, operator, threshold) {
+  if (!Number.isFinite(value) || !Number.isFinite(threshold)) {
+    return false;
+  }
+
+  switch (operator) {
+    case ">":
+    case "gt":
+      return value > threshold;
+    case ">=":
+    case "gte":
+      return value >= threshold;
+    case "<":
+    case "lt":
+      return value < threshold;
+    case "<=":
+    case "lte":
+      return value <= threshold;
+    case "==":
+    case "=":
+    case "eq":
+      return value === threshold;
+    default:
+      throw new Error(`Unsupported alert operator: ${operator}`);
+  }
+}
+
+function legacyThresholdRules(config) {
+  const thresholds = config.monitor.metric_thresholds || {};
+  const rules = [];
+
+  for (const [metric, threshold] of Object.entries(thresholds)) {
+    if (!threshold || typeof threshold !== "object") {
+      continue;
+    }
+
+    if (
+      threshold.max !== null &&
+      threshold.max !== undefined &&
+      Number.isFinite(Number(threshold.max))
+    ) {
+      rules.push({
+        id: `${metric}:max`,
+        label: `${threshold.label || metric} max`,
+        metric,
+        operator: ">=",
+        threshold: Number(threshold.max),
+        severity: threshold.severity || "warning",
+        channels: ["hourly"],
+        message: "Legacy max threshold reached.",
+      });
+    }
+
+    if (
+      threshold.min !== null &&
+      threshold.min !== undefined &&
+      Number.isFinite(Number(threshold.min))
+    ) {
+      rules.push({
+        id: `${metric}:min`,
+        label: `${threshold.label || metric} min`,
+        metric,
+        operator: "<=",
+        threshold: Number(threshold.min),
+        severity: threshold.severity || "warning",
+        channels: ["hourly"],
+        message: "Legacy min threshold reached.",
+      });
+    }
+  }
+
+  return rules;
+}
+
+function buildWatchlist(config, metricMap, channel = "hourly") {
+  const rules = [
+    ...(config.monitor.alert_rules || []),
+    ...legacyThresholdRules(config),
+  ];
+
+  return rules
+    .filter((rule) => {
+      if (rule.enabled === false) {
+        return false;
+      }
+
+      const channels = rule.channels || ["hourly"];
+      return channels.includes(channel);
+    })
+    .map((rule) => {
+      const metric = metricMap.get(rule.metric);
+      const threshold = Number(rule.threshold);
+      const operator = rule.operator || rule.rule || ">=";
+      const isAlert = metric
+        ? compareRule(metric.valueNumber, operator, threshold)
+        : false;
+
+      return {
+        id: rule.id,
+        label: rule.label || rule.id,
+        metricKey: rule.metric,
+        metricLabel: metric?.label || rule.metric,
+        current: metric?.valueNumber ?? null,
+        currentRaw: metric?.valueRaw || "",
+        unit: metric?.unit || "",
+        operator,
+        threshold,
+        thresholdRaw: formatMetricNumber(threshold, metric?.unit || ""),
+        severity: rule.severity || "warning",
+        channels: rule.channels || ["hourly"],
+        message: rule.message || "",
+        status: metric ? (isAlert ? "ALERT" : "OK") : "NO DATA",
+        isAlert,
+      };
+    });
+}
+
+function buildMetricAlertLines(watchlist = []) {
+  const alerts = watchlist.filter((item) => item.isAlert);
+
   if (alerts.length === 0) {
     return [];
   }
 
   return [
     "",
-    "[Metric Alerts]",
+    "[Alert Rules]",
     ...alerts.map((alert) =>
       [
         alert.label,
         `current ${alert.currentRaw}`,
-        `${alert.direction} ${alert.threshold}`,
+        `${alert.operator} ${alert.thresholdRaw}`,
+        alert.severity,
       ].join(" | "),
     ),
   ];
 }
 
-function collectMetricAlerts(config, snapshot) {
-  if (!snapshot) {
+function buildWatchlistLines(watchlist = []) {
+  if (watchlist.length === 0) {
     return [];
   }
 
-  const thresholdConfig = config.monitor.metric_thresholds || {};
-  const alerts = [];
-
-  for (const [key, threshold] of Object.entries(thresholdConfig)) {
-    if (!threshold || typeof threshold !== "object") {
-      continue;
-    }
-
-    const metric = findOperationalMetric(snapshot, key);
-
-    if (!metric || !Number.isFinite(metric.valueNumber)) {
-      continue;
-    }
-
-    const min =
-      threshold.min === null || threshold.min === undefined
-        ? null
-        : Number(threshold.min);
-    const max =
-      threshold.max === null || threshold.max === undefined
-        ? null
-        : Number(threshold.max);
-    const label =
-      threshold.label ||
-      `${metric.section} ${metric.plot} ${metric.series}`.replace(/\s+/g, " ");
-
-    if (Number.isFinite(max) && metric.valueNumber >= max) {
-      alerts.push({
-        key,
-        label,
-        currentRaw: metric.valueRaw,
-        threshold: max,
-        direction: ">= max",
-      });
-    }
-
-    if (Number.isFinite(min) && metric.valueNumber <= min) {
-      alerts.push({
-        key,
-        label,
-        currentRaw: metric.valueRaw,
-        threshold: min,
-        direction: "<= min",
-      });
-    }
-  }
-
-  return alerts;
+  return [
+    "",
+    "[Watchlist]",
+    ...watchlist.map((item) =>
+      [
+        item.status,
+        item.severity,
+        item.label,
+        `current ${item.currentRaw || "n/a"}`,
+        `${item.operator} ${item.thresholdRaw}`,
+      ].join(" | "),
+    ),
+  ];
 }
 
 function metricSummaryLines(snapshot, limit = 12) {
@@ -1137,7 +1515,7 @@ function extractRecommendationItems(text, limit) {
 
   return cleaned
     .split(/\r?\n/)
-    .map((line) => line.replace(/^\s*[-*•\d.)]+\s*/, "").trim())
+    .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").trim())
     .filter(Boolean)
     .slice(0, limit);
 }
@@ -1154,6 +1532,7 @@ function geminiApiKey(config) {
 
 function buildRecommendationPrompt(config, record, standingReport, options = {}) {
   const metricAlerts = options.metricAlerts || [];
+  const watchlist = options.watchlist || [];
   const language = config.ai?.recommendation_language || "English";
   const lines = [
     "You are advising a team in a supply chain simulation.",
@@ -1180,13 +1559,24 @@ function buildRecommendationPrompt(config, record, standingReport, options = {})
     lines.push("", "Operational metrics:", ...metricSummaryLines(options.operationalSnapshot));
   }
 
+  if (watchlist.length > 0) {
+    lines.push(
+      "",
+      "Watchlist rules:",
+      ...watchlist.map(
+        (item) =>
+          `${item.status}: ${item.label}, current=${item.currentRaw || "n/a"}, rule=${item.operator} ${item.thresholdRaw}, severity=${item.severity}`,
+      ),
+    );
+  }
+
   if (metricAlerts.length > 0) {
     lines.push(
       "",
       "Configured metric alerts:",
       ...metricAlerts.map(
         (alert) =>
-          `${alert.label}: current=${alert.currentRaw}, rule=${alert.direction} ${alert.threshold}`,
+          `${alert.label}: current=${alert.currentRaw}, rule=${alert.operator} ${alert.thresholdRaw}, severity=${alert.severity}`,
       ),
     );
   }
@@ -1246,7 +1636,10 @@ async function buildRecommendations(config, record, standingReport, options = {}
 
 function buildEmailSubject(config, record, options = {}) {
   const testPrefix = options.test ? "[TEST] " : "";
-  const alertPrefix = record.inventoryAlert ? "ALERT " : "";
+  const hasAlert =
+    record.inventoryAlert ||
+    (options.metricAlerts || []).some((item) => item.severity === "critical");
+  const alertPrefix = hasAlert ? "ALERT " : "";
 
   if (options.kind === "warning") {
     const minutes = options.warningMinutes || config.monitor.warning_minutes || 5;
@@ -1274,6 +1667,7 @@ function buildReportText(config, record, standingReport, options = {}) {
     `Warehouse inventory day: ${record.warehouseDay}`,
     `Warehouse threshold: ${record.threshold}`,
     `Inventory alert: ${record.inventoryAlert ? "YES" : "no"}`,
+    ...buildWatchlistLines(options.watchlist),
     "",
     "Recommendations",
     ...((options.recommendations?.items || []).map((item) => `- ${item}`)),
@@ -1406,6 +1800,55 @@ function buildRecommendationsHtml(recommendations) {
   ].join("");
 }
 
+function statusColor(status) {
+  if (status === "ALERT") {
+    return "#b91c1c";
+  }
+
+  if (status === "NO DATA") {
+    return "#64748b";
+  }
+
+  return "#047857";
+}
+
+function buildWatchlistHtml(watchlist = []) {
+  if (watchlist.length === 0) {
+    return "";
+  }
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Decision Watchlist</div>',
+    '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #d8dee9;border-radius:8px;overflow:hidden;font-size:13px;">',
+    '<thead><tr style="background:#e2e8f0;color:#334155;">',
+    '<th style="padding:9px;text-align:left;">Status</th>',
+    '<th style="padding:9px;text-align:left;">Severity</th>',
+    '<th style="padding:9px;text-align:left;">Indicator</th>',
+    '<th style="padding:9px;text-align:right;">Current</th>',
+    '<th style="padding:9px;text-align:right;">Rule</th>',
+    "</tr></thead>",
+    "<tbody>",
+    ...watchlist.map((item) => {
+      const color = statusColor(item.status);
+      const background = item.isAlert ? "#fff7ed" : "#ffffff";
+
+      return [
+        `<tr style="background:${background};">`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;color:${color};font-weight:700;">${escapeHtml(item.status)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(item.severity)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;font-weight:600;">${escapeHtml(item.label)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(item.currentRaw || "n/a")}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(`${item.operator} ${item.thresholdRaw}`)}</td>`,
+        "</tr>",
+      ].join("");
+    }),
+    "</tbody>",
+    "</table>",
+    "</div>",
+  ].join("");
+}
+
 function buildMetricAlertsHtml(alerts = []) {
   if (alerts.length === 0) {
     return "";
@@ -1426,7 +1869,7 @@ function buildMetricAlertsHtml(alerts = []) {
         "<tr>",
         `<td style="padding:8px;border-bottom:1px solid #fecaca;font-weight:700;">${escapeHtml(alert.label)}</td>`,
         `<td style="padding:8px;border-bottom:1px solid #fecaca;text-align:right;">${escapeHtml(alert.currentRaw)}</td>`,
-        `<td style="padding:8px;border-bottom:1px solid #fecaca;text-align:right;color:#b91c1c;font-weight:700;">${escapeHtml(`${alert.direction} ${alert.threshold}`)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #fecaca;text-align:right;color:#b91c1c;font-weight:700;">${escapeHtml(`${alert.operator} ${alert.thresholdRaw}`)}</td>`,
         "</tr>",
       ].join(""),
     ),
@@ -1460,11 +1903,16 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     ? `${minutes}-minute warning`
     : "Hourly monitoring report";
   const eyebrow = options.test ? "Test email" : "Supply Chain Watchdog";
-  const alertText = record.inventoryAlert
-    ? `Warehouse inventory is at or above ${record.threshold}.`
-    : `Warehouse inventory is below ${record.threshold}.`;
-  const bannerColor = isWarning || record.inventoryAlert ? "#b91c1c" : "#1d4ed8";
-  const bannerBg = isWarning || record.inventoryAlert ? "#fef2f2" : "#eff6ff";
+  const alertCount = (options.metricAlerts || []).length;
+  const hasCriticalAlert = (options.metricAlerts || []).some(
+    (item) => item.severity === "critical",
+  );
+  const alertText =
+    alertCount > 0
+      ? `${alertCount} watchlist alert${alertCount === 1 ? "" : "s"} detected.`
+      : `No configured watchlist alerts are active. Warehouse threshold is ${record.threshold}.`;
+  const bannerColor = isWarning || hasCriticalAlert ? "#b91c1c" : "#1d4ed8";
+  const bannerBg = isWarning || hasCriticalAlert ? "#fef2f2" : "#eff6ff";
 
   return [
     '<!doctype html>',
@@ -1490,6 +1938,7 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     buildCard("Report type", isWarning ? `${minutes}-minute warning` : "hourly"),
     "</tr>",
     "</table>",
+    buildWatchlistHtml(options.watchlist),
     buildRecommendationsHtml(options.recommendations),
     buildMetricAlertsHtml(options.metricAlerts),
     !isWarning ? buildOperationalSnapshotHtml(options.operationalSnapshot) : "",
@@ -1523,16 +1972,25 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
     throw new Error("Email report is enabled, but email.recipients is empty");
   }
 
+  const channel = options.kind === "warning" ? "warning" : "hourly";
+  const metricCatalog =
+    options.metricCatalog ??
+    buildMetricCatalog(config, record, standingReport, options.operationalSnapshot);
+  const watchlist = options.watchlist ?? buildWatchlist(config, metricCatalog, channel);
   const metricAlerts =
-    options.metricAlerts ?? collectMetricAlerts(config, options.operationalSnapshot);
+    options.metricAlerts ?? watchlist.filter((item) => item.isAlert);
   const recommendations =
     options.recommendations ??
     (await buildRecommendations(config, record, standingReport, {
       ...options,
+      metricCatalog,
+      watchlist,
       metricAlerts,
     }));
   const renderOptions = {
     ...options,
+    metricCatalog,
+    watchlist,
     metricAlerts,
     recommendations,
   };
@@ -1547,6 +2005,11 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
       record,
       standingReport,
       options.plotSnapshots,
+      {
+        metricCatalog,
+        watchlist,
+        operationalSnapshot: options.operationalSnapshot,
+      },
     );
 
     if (workbookBuffer) {
@@ -1569,6 +2032,11 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
       }`,
     );
     console.log(`Recommendations source: ${recommendations.source}`);
+    for (const item of metricAlerts) {
+      console.log(
+        `Alert: ${item.label} current=${item.currentRaw || "n/a"} rule=${item.operator} ${item.thresholdRaw}`,
+      );
+    }
     for (const item of recommendations.items) {
       console.log(`- ${item}`);
     }
@@ -1736,12 +2204,21 @@ async function runOnce(config) {
   const record = createRecord(config, dashboard, inventoryTable, standingReport, {
     checkedAt,
   });
+  const metricCatalog = buildMetricCatalog(
+    config,
+    record,
+    standingReport,
+    operationalSnapshot,
+  );
+  const watchlist = buildWatchlist(config, metricCatalog, "hourly");
   let emailSent = false;
 
   if (config.monitor.send_report_every_run) {
     emailSent = await sendReportEmail(config, record, standingReport, {
       operationalSnapshot,
       plotSnapshots,
+      metricCatalog,
+      watchlist,
     });
   }
 
@@ -1758,6 +2235,11 @@ async function runOnce(config) {
     standingReport,
     plotSnapshots,
     dataWorkbookPath,
+    {
+      operationalSnapshot,
+      metricCatalog,
+      watchlist,
+    },
   );
   appendHistory(historyPath, { ...record, emailSent });
   fs.writeFileSync(
@@ -1777,6 +2259,7 @@ async function runOnce(config) {
         last_target_cash_number: standingReport.target.cashNumber,
         last_threshold: record.threshold,
         last_inventory_alert: record.inventoryAlert,
+        last_alerts: watchlist.filter((item) => item.isAlert),
         last_operational_metrics: operationalSnapshot.metrics,
         last_email_sent_at: emailSent
           ? checkedAt
@@ -1861,39 +2344,36 @@ async function sendTestEmails(config) {
 }
 
 async function sendWarningEmail(config) {
-  const { dashboard, inventoryTable, standingReport } = await crawl(config, {
-    includePlots: false,
-  });
   const warningMinutes = Number(config.monitor.warning_minutes || 15);
+  const { dashboard, inventoryTable, plotSnapshots, standingReport } =
+    await crawl(config);
+  const operationalSnapshot = buildOperationalSnapshot(plotSnapshots, {});
   const record = createRecord(config, dashboard, inventoryTable, standingReport);
+  const metricCatalog = buildMetricCatalog(
+    config,
+    record,
+    standingReport,
+    operationalSnapshot,
+  );
+  const watchlist = buildWatchlist(config, metricCatalog, "warning");
+  const warningAlerts = watchlist.filter((item) => item.isAlert);
   let emailSent = false;
 
-  if (record.inventoryAlert) {
-    const fullCrawl = await crawl(config);
-    const fullRecord = createRecord(
+  if (warningAlerts.length > 0) {
+    emailSent = await sendReportEmail(
       config,
-      fullCrawl.dashboard,
-      fullCrawl.inventoryTable,
-      fullCrawl.standingReport,
+      record,
+      standingReport,
+      {
+        kind: "warning",
+        warningMinutes,
+        operationalSnapshot,
+        plotSnapshots,
+        metricCatalog,
+        watchlist,
+        metricAlerts: warningAlerts,
+      },
     );
-    const operationalSnapshot = buildOperationalSnapshot(
-      fullCrawl.plotSnapshots,
-      {},
-    );
-
-    if (fullRecord.inventoryAlert) {
-      emailSent = await sendReportEmail(
-        config,
-        fullRecord,
-        fullCrawl.standingReport,
-        {
-          kind: "warning",
-          warningMinutes,
-          operationalSnapshot,
-          plotSnapshots: fullCrawl.plotSnapshots,
-        },
-      );
-    }
   }
 
   console.log(`${warningMinutes}-minute warning email summary:`);
@@ -1903,6 +2383,12 @@ async function sendWarningEmail(config) {
   console.log(`Dashboard day: ${record.dashboardDay}`);
   console.log(`Warehouse inventory: ${record.warehouseInventory}`);
   console.log(`Inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
+  console.log(`Warning rule alerts: ${warningAlerts.length}`);
+  for (const alert of warningAlerts) {
+    console.log(
+      `- ${alert.label}: ${alert.currentRaw || "n/a"} ${alert.operator} ${alert.thresholdRaw}`,
+    );
+  }
 }
 
 async function main() {

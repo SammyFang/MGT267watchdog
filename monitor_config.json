@@ -57,6 +57,88 @@
     "warning_minutes": 15,
     "send_report_every_run": true,
     "gap_percentage_formula": "(target_cash - team_cash) / team_cash * 100",
+    "alert_rules": [
+      {
+        "id": "warehouse_inventory_high",
+        "label": "Warehouse inventory high",
+        "metric": "warehouse_inventory:warehouse",
+        "operator": ">=",
+        "threshold": 450,
+        "severity": "critical",
+        "channels": ["warning", "hourly"],
+        "message": "Warehouse inventory is above the high-stock threshold."
+      },
+      {
+        "id": "warehouse_stockout_risk",
+        "label": "Warehouse stockout risk",
+        "metric": "warehouse_inventory:warehouse",
+        "operator": "<=",
+        "threshold": 50,
+        "severity": "critical",
+        "channels": ["warning", "hourly"],
+        "message": "Warehouse inventory is very low; stockout risk is elevated."
+      },
+      {
+        "id": "lost_demand_detected",
+        "label": "Lost demand detected",
+        "metric": "hq_lost_demand:Calopeia",
+        "operator": ">",
+        "threshold": 0,
+        "severity": "critical",
+        "channels": ["hourly"],
+        "message": "Lost demand is present; inspect supply and shipment timing."
+      },
+      {
+        "id": "lost_demand_rate_high",
+        "label": "Lost demand rate high",
+        "metric": "derived:lost_demand_rate",
+        "operator": ">=",
+        "threshold": 20,
+        "severity": "critical",
+        "channels": ["hourly"],
+        "message": "Lost demand is high relative to demand."
+      },
+      {
+        "id": "days_of_cover_low",
+        "label": "Days of cover low",
+        "metric": "derived:days_of_cover",
+        "operator": "<",
+        "threshold": 1,
+        "severity": "warning",
+        "channels": ["hourly"],
+        "message": "Warehouse coverage is below one demand day."
+      },
+      {
+        "id": "days_of_cover_high",
+        "label": "Days of cover high",
+        "metric": "derived:days_of_cover",
+        "operator": ">",
+        "threshold": 5,
+        "severity": "warning",
+        "channels": ["hourly"],
+        "message": "Warehouse coverage is high; watch inventory carrying cost."
+      },
+      {
+        "id": "shipments_below_demand",
+        "label": "Shipments below demand",
+        "metric": "derived:shipment_to_demand_ratio",
+        "operator": "<",
+        "threshold": 0.8,
+        "severity": "warning",
+        "channels": ["hourly"],
+        "message": "Shipments are below demand; check fulfillment capacity."
+      },
+      {
+        "id": "cash_lead_narrow",
+        "label": "Cash lead narrow",
+        "metric": "derived:cash_lead_percent_vs_nearest",
+        "operator": "<",
+        "threshold": 5,
+        "severity": "warning",
+        "channels": ["hourly"],
+        "message": "Cash lead over the nearest competitor is narrowing."
+      }
+    ],
     "metric_thresholds": {
       "warehouse_inventory:mail": {
         "label": "Warehouse mail inventory",
@@ -126,5 +208,8 @@
     "standing_gaps_csv": ".monitor-state/standing_gaps_latest.csv",
     "operational_snapshot_csv": ".monitor-state/operational_snapshot_latest.csv",
     "data_workbook_xlsx": ".monitor-state/supply_chain_data_latest.xlsx"
+  },
+  "excel": {
+    "exponential_smoothing_alpha": 0.3
   }
 }
