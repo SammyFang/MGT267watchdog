@@ -41,3 +41,11 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Upload email output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-test-output
+          path: .monitor-state
+          if-no-files-found: ignore

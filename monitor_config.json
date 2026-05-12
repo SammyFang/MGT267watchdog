@@ -207,7 +207,8 @@
     "warehouse_inventory_csv": ".monitor-state/warehouse_inventory_latest.csv",
     "standing_gaps_csv": ".monitor-state/standing_gaps_latest.csv",
     "operational_snapshot_csv": ".monitor-state/operational_snapshot_latest.csv",
-    "data_workbook_xlsx": ".monitor-state/supply_chain_data_latest.xlsx"
+    "data_workbook_xlsx": ".monitor-state/supply_chain_data_latest.xlsx",
+    "email_delivery_json": ".monitor-state/email_delivery_latest.json"
   },
   "excel": {
     "exponential_smoothing_alpha": 0.3

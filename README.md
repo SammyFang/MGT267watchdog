@@ -178,3 +178,6 @@ Output files are written to `.monitor-state/`:
 - `standing_gaps_latest.csv`
 - `operational_snapshot_latest.csv`
 - `supply_chain_data_latest.xlsx`
+- `email_delivery_latest.json`
+
+Email delivery is validated recipient-by-recipient. The workflow fails if SMTP does not accept every configured recipient, and `email_delivery_latest.json` records accepted/rejected recipients and message IDs.

@@ -1030,6 +1030,34 @@ function isEmailEnabled(config) {
   return config.email.enabled;
 }
 
+function normalizeRecipients(recipients) {
+  return [...new Set((recipients || []).map((item) => String(item).trim()).filter(Boolean))];
+}
+
+function formatFromAddress() {
+  const from = requiredEnv("SMTP_FROM");
+
+  if (from.includes("<")) {
+    return from;
+  }
+
+  return `MGT267 Watchdog <${from}>`;
+}
+
+function emailDeliveryLogPath(config) {
+  return path.resolve(
+    process.cwd(),
+    config.output.email_delivery_json || ".monitor-state/email_delivery_latest.json",
+  );
+}
+
+function writeEmailDeliveryLog(config, deliveryLog) {
+  const filePath = emailDeliveryLogPath(config);
+  ensureDir(path.dirname(filePath));
+  fs.writeFileSync(`${filePath}`, `${JSON.stringify(deliveryLog, null, 2)}\n`, "utf8");
+  return filePath;
+}
+
 function buildStandingLines(standingReport) {
   return standingReport.rows.map((row) =>
     [
@@ -1967,8 +1995,9 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
   }
 
   const recipients = config.email.recipients || [];
+  const normalizedRecipients = normalizeRecipients(recipients);
 
-  if (recipients.length === 0) {
+  if (normalizedRecipients.length === 0) {
     throw new Error("Email report is enabled, but email.recipients is empty");
   }
 
@@ -2024,7 +2053,7 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
 
   if (isEmailDryRun()) {
     console.log("EMAIL_DRY_RUN=1, email report not sent.");
-    console.log(`Dry-run recipients: ${recipients.join(", ")}`);
+    console.log(`Dry-run recipients: ${normalizedRecipients.join(", ")}`);
     console.log(`Dry-run subject: ${subject}`);
     console.log(
       `Dry-run Excel attachment: ${
@@ -2044,15 +2073,68 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
   }
 
   const transporter = createTransport();
-
-  await transporter.sendMail({
-    from: requiredEnv("SMTP_FROM"),
-    to: recipients.join(","),
+  await transporter.verify();
+  const deliveryLog = {
+    checked_at: record.checkedAt,
+    checked_at_local: record.checkedAtLocal,
+    kind: options.kind || "hourly",
+    subject,
+    recipients: normalizedRecipients,
+    attachment_filenames: attachments.map((attachment) => attachment.filename),
+    results: [],
+  };
+  const baseMail = {
+    from: formatFromAddress(),
     subject,
     text,
     html,
     attachments,
-  });
+    headers: {
+      "X-MGT267-Watchdog": "true",
+      "X-MGT267-Report-Kind": options.kind || "hourly",
+      "X-MGT267-Target-Team": record.targetTeam,
+    },
+  };
+  const failures = [];
+
+  for (const recipient of normalizedRecipients) {
+    const info = await transporter.sendMail({
+      ...baseMail,
+      to: recipient,
+    });
+    const accepted = (info.accepted || []).map(String);
+    const rejected = (info.rejected || []).map(String);
+    const pending = (info.pending || []).map(String);
+    const recipientAccepted = accepted.some(
+      (acceptedRecipient) =>
+        acceptedRecipient.toLowerCase() === recipient.toLowerCase(),
+    );
+
+    deliveryLog.results.push({
+      recipient,
+      accepted,
+      rejected,
+      pending,
+      message_id: info.messageId || "",
+      response: info.response || "",
+      envelope: info.envelope || {},
+    });
+    console.log(
+      `SMTP delivery recipient=${recipient} accepted=${accepted.join("|") || "none"} rejected=${rejected.join("|") || "none"} messageId=${info.messageId || "n/a"}`,
+    );
+
+    if (!recipientAccepted || rejected.length > 0) {
+      failures.push(recipient);
+    }
+  }
+
+  deliveryLog.success = failures.length === 0;
+  deliveryLog.delivery_log_path = writeEmailDeliveryLog(config, deliveryLog);
+  console.log(`Email delivery log: ${deliveryLog.delivery_log_path}`);
+
+  if (failures.length > 0) {
+    throw new Error(`SMTP did not accept all recipients: ${failures.join(", ")}`);
+  }
 
   return true;
 }
