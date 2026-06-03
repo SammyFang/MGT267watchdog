@@ -2117,6 +2117,32 @@ function remainingGameDays(config, record) {
   return Math.max(0, endDay - day);
 }
 
+function coverageTargets(config, record) {
+  const targets = config.auto_adjust?.targets || {};
+  const baseMin = Number(targets.days_of_cover_min ?? 2);
+  const baseMax = Number(targets.days_of_cover_max ?? 5);
+  const baseTarget = Number(
+    targets.days_of_cover_target ?? (baseMin + baseMax) / 2,
+  );
+  const remainingDays = remainingGameDays(config, record);
+  const maxByGameClock = Number.isFinite(remainingDays)
+    ? Math.max(0, remainingDays)
+    : baseMax;
+  const max = Math.max(0, Math.min(baseMax, maxByGameClock));
+  const target = Math.max(0, Math.min(baseTarget, max));
+  const min = Math.max(0, Math.min(baseMin, target || max));
+
+  return {
+    min,
+    max,
+    target,
+    baseMin,
+    baseMax,
+    baseTarget,
+    remainingDays,
+  };
+}
+
 function policyBaseline(config, policySnapshot) {
   return mergePolicyBaseline(
     config.auto_adjust?.policy_baseline || {},
@@ -2205,9 +2231,7 @@ function gameRuleContextLines(config, record) {
 function serviceContextLines(config, record, metricCatalog, policySnapshot) {
   const regions = servedRegionsForWarehouse(policySnapshot || [], "warehouse_calopeia");
   const servedRegions = regions.length ? regions : ["Calopeia"];
-  const targets = config.auto_adjust?.targets || {};
-  const daysMax = Number(targets.days_of_cover_max ?? 5);
-  const daysMin = Number(targets.days_of_cover_min ?? 2);
+  const targets = coverageTargets(config, record);
   const demand =
     metricRaw(metricCatalog, "derived:calopeia_served_demand") ||
     metricRaw(metricCatalog, "hq_demand:Calopeia") ||
@@ -2228,9 +2252,9 @@ function serviceContextLines(config, record, metricCatalog, policySnapshot) {
   return [
     `Calopeia warehouse currently serves ${servedRegions.length} region(s): ${servedRegions.join(", ")}.`,
     `Use served-region demand for Calopeia buffer decisions: served demand=${demand}, served shipments=${shipments}, served lost demand=${lostDemand}, served days of cover=${daysCoverText}.`,
-    `The 450 inventory threshold is a review checkpoint, not proof of excess when Calopeia serves multiple regions.`,
-    `If served days of cover is between ${daysMin} and ${daysMax} and lost demand is zero, recommend holding or restoring policy settings rather than reducing inventory just to clear an alert.`,
-    "Avoid bullwhip over-correction: do not swing order point or quantity based on one checkpoint; prefer small staged changes and wait for truck pipeline unless lost demand appears.",
+    "The legacy 450 inventory number is not an active alert threshold; it has no standalone basis without served demand and remaining-day context.",
+    `If served days of cover is between ${formatMetricNumber(targets.min, "days")} and ${formatMetricNumber(targets.max, "days")} and lost demand is zero, recommend holding or restoring policy settings rather than reducing inventory.`,
+    "Avoid bullwhip over-correction: do not swing order point or quantity based on one checkpoint; prefer small staged changes and verify truck/mail/WIP pipeline unless lost demand appears.",
   ];
 }
 
@@ -2337,15 +2361,12 @@ function buildAutoAdjustmentPlan(
   const mailPipeline = metricValue(metricCatalog, "warehouse_inventory:mail");
   const rules = gameRules(config);
 
-  const daysMin = Number(targets.days_of_cover_min ?? 2);
-  const daysMax = Number(targets.days_of_cover_max ?? 5);
-  const daysTarget = Number(
-    targets.days_of_cover_target ?? (daysMin + daysMax) / 2,
-  );
+  const coverTargets = coverageTargets(config, record);
+  const daysMin = coverTargets.min;
+  const daysMax = coverTargets.max;
+  const daysTarget = coverTargets.target;
   const inventoryLow = Number(targets.warehouse_inventory_low ?? 50);
-  const inventoryHigh = Number(
-    targets.warehouse_inventory_high ?? config.monitor.warehouse_inventory_threshold,
-  );
+  const inventoryHigh = Number(targets.warehouse_inventory_high);
   const lostDemandMax = Number(targets.lost_demand_max ?? 0);
   const shipmentRatioMin = Number(targets.shipment_to_demand_ratio_min ?? 0.9);
   const wipRatioMax = Number(targets.wip_to_demand_ratio_max ?? 3);
@@ -2363,7 +2384,9 @@ function buildAutoAdjustmentPlan(
       : null;
   const excessCoverage =
     (Number.isFinite(daysOfCover) && daysOfCover > daysMax) ||
-    (servedRegionCount <= 1 && record.warehouseInventory >= inventoryHigh);
+    (servedRegionCount <= 1 &&
+      Number.isFinite(inventoryHigh) &&
+      record.warehouseInventory >= inventoryHigh);
   const shortageRisk =
     (Number.isFinite(lostDemand) && lostDemand > lostDemandMax) ||
     (Number.isFinite(daysOfCover) && daysOfCover < daysMin) ||
@@ -2749,8 +2772,9 @@ function addSummaryWorksheet(workbook, usedNames, config, record) {
   worksheet.addRow(["Dashboard day", record.dashboardDay]);
   worksheet.addRow(["Warehouse inventory", dataCell(record.warehouseInventory)]);
   worksheet.addRow(["Warehouse inventory day", dataCell(record.warehouseDay)]);
-  worksheet.addRow(["Warehouse inventory threshold", dataCell(record.threshold)]);
-  worksheet.addRow(["Inventory alert", record.inventoryAlert ? "yes" : "no"]);
+  worksheet.addRow(["Legacy inventory reference", dataCell(record.threshold)]);
+  worksheet.addRow(["Inventory reference crossed", record.inventoryCheckpoint ? "yes" : "no"]);
+  worksheet.addRow(["Active inventory alert", record.inventoryAlert ? "yes" : "no"]);
   worksheet.addRow(["EMA alpha", Number.isFinite(alpha) ? alpha : 0.3]);
   styleWorksheet(worksheet);
 }
@@ -3266,6 +3290,7 @@ function appendHistory(filePath, record) {
     "target_cash",
     "target_cash_number",
     "threshold",
+    "inventory_checkpoint",
     "inventory_alert",
     "email_sent",
   ];
@@ -3281,6 +3306,7 @@ function appendHistory(filePath, record) {
     record.targetCash,
     record.targetCashNumber ?? "",
     record.threshold,
+    record.inventoryCheckpoint ? "yes" : "no",
     record.inventoryAlert ? "yes" : "no",
     record.emailSent ? "yes" : "no",
   ];
@@ -3685,7 +3711,11 @@ function buildMetricCatalog(config, record, standingReport, snapshot, options = 
     demandRegions,
   );
   const wip = metricMap.get("factory_wip:Calopeia")?.valueNumber;
+  const truckPipeline = metricMap.get("warehouse_inventory:truck")?.valueNumber;
+  const mailPipeline = metricMap.get("warehouse_inventory:mail")?.valueNumber;
   const competitor = nearestCompetitor(standingReport);
+  const coverTargets = coverageTargets(config, record);
+  const rules = gameRules(config);
 
   addMetric(metricMap, {
     key: "derived:calopeia_served_region_count",
@@ -3694,6 +3724,34 @@ function buildMetricCatalog(config, record, standingReport, snapshot, options = 
     valueRaw: String(demandRegions.length),
     unit: "regions",
     source: "warehouse policy",
+  });
+  addMetric(metricMap, {
+    key: "derived:remaining_game_days",
+    label: "Remaining game days",
+    valueNumber: coverTargets.remainingDays,
+    unit: "days",
+    source: `game end day ${rules.end_day}`,
+  });
+  addMetric(metricMap, {
+    key: "derived:cover_target_min",
+    label: "Dynamic cover minimum",
+    valueNumber: coverTargets.min,
+    unit: "days",
+    source: "configured target adjusted by remaining game days",
+  });
+  addMetric(metricMap, {
+    key: "derived:cover_target_max",
+    label: "Dynamic cover maximum",
+    valueNumber: coverTargets.max,
+    unit: "days",
+    source: "configured target adjusted by remaining game days",
+  });
+  addMetric(metricMap, {
+    key: "derived:cover_target",
+    label: "Dynamic cover target",
+    valueNumber: coverTargets.target,
+    unit: "days",
+    source: "configured target adjusted by remaining game days",
   });
 
   if (Number.isFinite(demand)) {
@@ -3727,12 +3785,55 @@ function buildMetricCatalog(config, record, standingReport, snapshot, options = 
   }
 
   if (Number.isFinite(demand) && demand > 0) {
+    const daysOfCover = record.warehouseInventory / demand;
+    const pipelineUnits = [wip, truckPipeline, mailPipeline]
+      .filter(Number.isFinite)
+      .reduce((sum, value) => sum + value, 0);
+    const totalCover = (record.warehouseInventory + pipelineUnits) / demand;
+
     addMetric(metricMap, {
       key: "derived:days_of_cover",
       label: "Days of cover",
-      valueNumber: record.warehouseInventory / demand,
+      valueNumber: daysOfCover,
       unit: "days",
       source: `derived from served demand: ${demandRegions.join(", ")}`,
+    });
+    addMetric(metricMap, {
+      key: "derived:inbound_pipeline_units",
+      label: "Inbound pipeline units",
+      valueNumber: pipelineUnits,
+      unit: "units",
+      source: "factory WIP + warehouse mail + warehouse truck",
+    });
+    addMetric(metricMap, {
+      key: "derived:pipeline_days_of_cover",
+      label: "Inventory plus pipeline days of cover",
+      valueNumber: totalCover,
+      unit: "days",
+      source: "warehouse inventory + factory/WIP transport pipeline",
+    });
+    addMetric(metricMap, {
+      key: "derived:cover_shortage_gap",
+      label: "Dynamic cover shortage gap",
+      valueNumber: coverTargets.min - daysOfCover,
+      unit: "days",
+      source: "positive means served cover is below dynamic minimum",
+    });
+    addMetric(metricMap, {
+      key: "derived:cover_excess_gap",
+      label: "Dynamic cover excess gap",
+      valueNumber: daysOfCover - coverTargets.max,
+      unit: "days",
+      source: "positive means served cover is above dynamic maximum",
+    });
+    addMetric(metricMap, {
+      key: "derived:endgame_excess_cover_gap",
+      label: "Endgame excess cover gap",
+      valueNumber: Number.isFinite(coverTargets.remainingDays)
+        ? daysOfCover - coverTargets.remainingDays
+        : null,
+      unit: "days",
+      source: "positive means cover exceeds remaining demand horizon",
     });
   }
 
@@ -3747,12 +3848,24 @@ function buildMetricCatalog(config, record, standingReport, snapshot, options = 
   }
 
   if (Number.isFinite(shipments) && Number.isFinite(demand) && demand > 0) {
+    const shipmentRatio = shipments / demand;
+    const shipmentRatioMin = Number(
+      config.auto_adjust?.targets?.shipment_to_demand_ratio_min ?? 0.9,
+    );
+
     addMetric(metricMap, {
       key: "derived:shipment_to_demand_ratio",
       label: "Shipment / demand ratio",
-      valueNumber: shipments / demand,
+      valueNumber: shipmentRatio,
       unit: "ratio",
       source: "derived",
+    });
+    addMetric(metricMap, {
+      key: "derived:shipment_shortage_gap",
+      label: "Shipment coverage shortage gap",
+      valueNumber: shipmentRatioMin - shipmentRatio,
+      unit: "ratio",
+      source: "positive means shipments are below target demand coverage",
     });
   }
 
@@ -4004,8 +4117,9 @@ function buildFallbackRecommendations(config, record, standingReport, options = 
   const daysOfCover = metricValue(metricCatalog, "derived:days_of_cover");
   const shipmentRatio = metricValue(metricCatalog, "derived:shipment_to_demand_ratio");
   const targets = config.auto_adjust?.targets || {};
-  const daysMin = Number(targets.days_of_cover_min ?? 2);
-  const daysMax = Number(targets.days_of_cover_max ?? 5);
+  const coverTargets = coverageTargets(config, record);
+  const daysMin = coverTargets.min;
+  const daysMax = coverTargets.max;
   const inventoryLow = Number(targets.warehouse_inventory_low ?? 50);
   const shipmentRatioMin = Number(targets.shipment_to_demand_ratio_min ?? 0.9);
   const rules = gameRules(config);
@@ -4027,10 +4141,9 @@ function buildFallbackRecommendations(config, record, standingReport, options = 
     (Number.isFinite(daysOfCover) && daysOfCover < daysMin) ||
     record.warehouseInventory <= inventoryLow;
   const highStock =
-    (serviceRegions.length <= 1 && record.inventoryAlert) ||
     (Number.isFinite(daysOfCover) && daysOfCover > daysMax);
   const checkpointOnly =
-    record.inventoryAlert &&
+    record.inventoryCheckpoint &&
     serviceRegions.length > 1 &&
     Number.isFinite(daysOfCover) &&
     daysOfCover <= daysMax &&
@@ -4046,7 +4159,7 @@ function buildFallbackRecommendations(config, record, standingReport, options = 
     );
   } else if (checkpointOnly) {
     suggestions.push(
-      `Do not reduce Calopeia just to clear the 450 checkpoint: it serves ${serviceRegions.join(", ")} and has ${daysCoverText}; hold or restore the current order point unless served lost demand appears.`,
+      `Do not reduce Calopeia just because it crossed the legacy 450 reference: it serves ${serviceRegions.join(", ")} and has ${daysCoverText}; hold or restore the current order point unless served lost demand appears.`,
     );
   } else {
     suggestions.push(
@@ -4141,8 +4254,9 @@ function recommendationGuardrailContext(config, record, options = {}) {
   );
   const serviceRegions = regions.length ? regions : ["Calopeia"];
   const targets = config.auto_adjust?.targets || {};
-  const daysMin = Number(targets.days_of_cover_min ?? 2);
-  const daysMax = Number(targets.days_of_cover_max ?? 5);
+  const coverTargets = coverageTargets(config, record);
+  const daysMin = coverTargets.min;
+  const daysMax = coverTargets.max;
   const inventoryLow = Number(targets.warehouse_inventory_low ?? 50);
   const daysOfCover = metricValue(metricCatalog, "derived:days_of_cover");
   const lostDemand =
@@ -4154,7 +4268,7 @@ function recommendationGuardrailContext(config, record, options = {}) {
     record.warehouseInventory <= inventoryLow;
   const trueHighCover = Number.isFinite(daysOfCover) && daysOfCover > daysMax;
   const checkpointOnly =
-    record.inventoryAlert &&
+    record.inventoryCheckpoint &&
     serviceRegions.length > 1 &&
     Number.isFinite(daysOfCover) &&
     daysOfCover <= daysMax &&
@@ -4269,7 +4383,7 @@ function buildRecommendationPrompt(config, record, standingReport, options = {})
     "Each recommendation should be one short sentence, useful for operations decisions, and avoid formulas.",
     "Focus on practical levers: order point, order quantity, shipping method, capacity timing, cash protection, and lost-demand prevention.",
     "Do not recommend changing priority level because it does not affect this assignment.",
-    "Do not recommend reducing inventory, order point, quantity, or production solely because the 450 warehouse checkpoint is active.",
+    "Do not recommend reducing inventory, order point, quantity, or production solely because inventory is near or above 450; 450 is a legacy reference, not an active alert threshold.",
     "If Calopeia is serving multiple regions with zero lost demand and normal served days of cover, recommend hold/restore settings and watch the truck pipeline instead of cutting.",
     "Return JSON only in this shape: {\"recommendations\":[\"...\"]}",
     "",
@@ -4294,8 +4408,9 @@ function buildRecommendationPrompt(config, record, standingReport, options = {})
     `Dashboard day: ${record.dashboardDay}`,
     `Warehouse inventory: ${record.warehouseInventory}`,
     `Warehouse inventory day: ${record.warehouseDay}`,
-    `Warehouse inventory alert threshold: ${record.threshold}`,
-    `Warehouse inventory alert: ${record.inventoryAlert ? "yes" : "no"}`,
+    `Legacy inventory reference: ${record.threshold}`,
+    `Inventory reference crossed: ${record.inventoryCheckpoint ? "yes" : "no"}`,
+    `Active inventory alert: ${record.inventoryAlert ? "yes" : "no"}`,
     "",
     "Standing rows:",
     ...standingSummaryLines(standingReport),
@@ -4428,8 +4543,9 @@ function buildReportText(config, record, standingReport, options = {}) {
     `Dashboard day: ${record.dashboardDay}`,
     `Warehouse inventory: ${record.warehouseInventory}`,
     `Warehouse inventory day: ${record.warehouseDay}`,
-    `Warehouse threshold: ${record.threshold}`,
-    `Inventory alert: ${record.inventoryAlert ? "YES" : "no"}`,
+    `Legacy inventory reference: ${record.threshold}`,
+    `Inventory reference crossed: ${record.inventoryCheckpoint ? "yes" : "no"}`,
+    `Active inventory alert: ${record.inventoryAlert ? "YES" : "no"}`,
     `Game entry URL: ${gameEntryUrl}`,
     ...buildWatchlistLines(options.watchlist),
     "",
@@ -4836,7 +4952,7 @@ function buildReportHtml(config, record, standingReport, options = {}) {
   const alertText =
     alertCount > 0
       ? `${alertCount} watchlist alert${alertCount === 1 ? "" : "s"} detected.`
-      : `No configured watchlist alerts are active. Warehouse threshold is ${record.threshold}.`;
+      : "No configured watchlist alerts are active.";
   const bannerColor = isWarning || hasCriticalAlert ? "#b91c1c" : "#1d4ed8";
   const bannerBg = isWarning || hasCriticalAlert ? "#fef2f2" : "#eff6ff";
 
@@ -4860,7 +4976,7 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     "</tr><tr>",
     buildCard("Warehouse inventory", record.warehouseInventory, record.inventoryAlert ? "#b91c1c" : "#0f766e"),
     buildCard("Inventory day", record.warehouseDay),
-    buildCard("Threshold", record.threshold, "#ea580c"),
+    buildCard("Reference", record.threshold, "#64748b"),
     buildCard("Report type", isWarning ? `${minutes}-minute warning` : "hourly"),
     "</tr>",
     "</table>",
@@ -5172,9 +5288,12 @@ async function crawl(config, options = {}) {
 function createRecord(config, dashboard, inventoryTable, standingReport, options = {}) {
   const checkedAt = options.checkedAt || new Date().toISOString();
   const threshold = Number(config.monitor.warehouse_inventory_threshold);
+  const thresholdEnabled = config.monitor.warehouse_inventory_threshold_enabled === true;
   const currentInventory = inventoryTable.latestWarehouse.inventory;
+  const inventoryCheckpoint =
+    Number.isFinite(threshold) && currentInventory >= threshold;
   const inventoryAlert =
-    options.inventoryAlertOverride ?? currentInventory >= threshold;
+    options.inventoryAlertOverride ?? (thresholdEnabled && inventoryCheckpoint);
 
   return {
     checkedAt,
@@ -5189,6 +5308,7 @@ function createRecord(config, dashboard, inventoryTable, standingReport, options
     targetCash: standingReport.target.cash,
     targetCashNumber: standingReport.target.cashNumber,
     threshold,
+    inventoryCheckpoint,
     inventoryAlert,
   };
 }
@@ -5370,8 +5490,9 @@ async function runOnce(config) {
   console.log(`Target cash: ${standingReport.target.cash}`);
   console.log(`Warehouse inventory: ${record.warehouseInventory}`);
   console.log(`Warehouse inventory day: ${inventoryTable.latestWarehouse.day}`);
-  console.log(`Threshold: ${record.threshold}`);
-  console.log(`Inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
+  console.log(`Legacy inventory reference: ${record.threshold}`);
+  console.log(`Inventory reference crossed: ${record.inventoryCheckpoint ? "yes" : "no"}`);
+  console.log(`Active inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
   console.log(`Report decision: ${reportDecision.reason}`);
   console.log(`Email sent: ${emailSent ? "yes" : "no"}`);
   console.log(`State: ${statePath}`);
@@ -5498,7 +5619,8 @@ async function sendWarningEmail(config) {
   console.log(`Target cash: ${record.targetCash}`);
   console.log(`Dashboard day: ${record.dashboardDay}`);
   console.log(`Warehouse inventory: ${record.warehouseInventory}`);
-  console.log(`Inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
+  console.log(`Inventory reference crossed: ${record.inventoryCheckpoint ? "yes" : "no"}`);
+  console.log(`Active inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
   console.log(`Warning rule alerts: ${warningAlerts.length}`);
   console.log(`Backtest workbook: ${backtestOutputs.workbookPath || "not written"}`);
   for (const alert of warningAlerts) {

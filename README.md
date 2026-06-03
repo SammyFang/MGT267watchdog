@@ -8,7 +8,7 @@ Most settings are in `monitor_config.json`:
 
 - `crawl.interval_minutes`: local watch interval, currently `60`.
 - `monitor.target_team`: team to lock for comparison, currently `group7`.
-- `monitor.warehouse_inventory_threshold`: inventory alert threshold, currently `450`.
+- `monitor.warehouse_inventory_threshold`: legacy inventory reference, currently `450`; it is not an active alert unless `warehouse_inventory_threshold_enabled` is set to `true`.
 - `monitor.warning_minutes`: warning email interval label, currently `15`.
 - `monitor.send_report_every_run`: send one email each scheduled run.
 - `monitor.report_min_interval_minutes`: minimum time between scheduled hourly report emails, currently `50`.
@@ -79,8 +79,8 @@ gap_percent = gap_amount / team_cash * 100
 
 Positive values mean `group7` is ahead of that team. Negative values mean `group7` is behind that team.
 
-When WH1 warehouse inventory is at or above `monitor.warehouse_inventory_threshold`, the hourly email subject is prefixed with `ALERT`.
-That threshold is treated as a review checkpoint. Action Notes compare inventory with the demand of all regions currently served by the Calopeia warehouse before suggesting any inventory reduction.
+Email subjects are prefixed with `ALERT` only when an enabled watchlist rule is in `ALERT`.
+The old `450` warehouse number is kept only as a legacy reference. It is not treated as proof of excess inventory because Calopeia may temporarily serve multiple regions. Action Notes compare inventory with served-region demand, lost demand, pipeline/WIP, and remaining game days before suggesting any inventory reduction.
 
 ## Required Secrets
 
@@ -122,12 +122,6 @@ GitHub path: `Settings -> Secrets and variables -> Actions -> New repository sec
 
 ## Editable Alert Thresholds
 
-The 15-minute warning email threshold is:
-
-```json
-"warehouse_inventory_threshold": 450
-```
-
 Primary watchlist thresholds are in `monitor.alert_rules`. Each rule has:
 
 - `enabled`: set to `false` to disable a rule.
@@ -137,7 +131,13 @@ Primary watchlist thresholds are in `monitor.alert_rules`. Each rule has:
 - `severity`: `warning` or `critical`.
 - `channels`: `hourly`, `warning`, or both.
 
-The 15-minute workflow only sends when a rule with the `warning` channel is in `ALERT`.
+The 15-minute workflow does not send on a fixed inventory number. It only sends when a rule with the `warning` channel is in `ALERT`, currently:
+
+- warehouse inventory is depleted (`warehouse_inventory:warehouse <= 0`)
+- served lost demand appears (`derived:calopeia_served_lost_demand > 0`)
+- served warehouse cover is below the dynamic minimum (`derived:cover_shortage_gap > 0`)
+
+The `450` rule is disabled by default as `warehouse_inventory_high`; set `enabled` to `true` and `warehouse_inventory_threshold_enabled` to `true` only if you intentionally want the old static checkpoint behavior back.
 
 Other legacy hourly report alert thresholds are in `monitor.metric_thresholds`. Set `min` or `max` to a number; leave unused thresholds as `null`.
 
@@ -152,12 +152,22 @@ Available metric keys:
 - `hq_lost_demand:Calopeia`
 - `hq_cash_balance:value`
 - `derived:days_of_cover`
+- `derived:remaining_game_days`
+- `derived:cover_target_min`
+- `derived:cover_target_max`
+- `derived:cover_target`
+- `derived:inbound_pipeline_units`
+- `derived:pipeline_days_of_cover`
+- `derived:cover_shortage_gap`
+- `derived:cover_excess_gap`
+- `derived:endgame_excess_cover_gap`
 - `derived:calopeia_served_demand`
 - `derived:calopeia_served_lost_demand`
 - `derived:calopeia_served_shipments`
 - `derived:calopeia_served_region_count`
 - `derived:lost_demand_rate`
 - `derived:shipment_to_demand_ratio`
+- `derived:shipment_shortage_gap`
 - `derived:wip_to_demand_ratio`
 - `derived:cash_lead_percent_vs_nearest`
 
@@ -172,7 +182,7 @@ Editable fields:
 - `auto_adjust.bounds`: min/max allowed values used when calculating suggested values.
 - `auto_adjust.policy_baseline`: current Factory and Warehouse policy values used as the baseline for suggested changes.
 
-The current days-of-cover research band is `2` to `5` days with target `3`, calculated from the total demand of regions served by Calopeia. This matches the high-cover alert at `> 5` days and the game rule that inventory becomes worthless on day `1460`.
+The current days-of-cover research band is `2` to `5` days with target `3`, calculated from the total demand of regions served by Calopeia. The active band is automatically capped by remaining game days before day `1460`, so the report does not encourage building inventory that will become obsolete. This replaces the old static `450` inventory alert and is intended to reduce bullwhip-style over-correction.
 `priority1` is still captured in policy tables for completeness, but it is intentionally excluded from recommendations because the assignment states priority level has no effect.
 
 Outputs:

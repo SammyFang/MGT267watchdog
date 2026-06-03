@@ -34,7 +34,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Check inventory and send threshold warning
+      - name: Check dynamic warning rules and send alert
         run: npm run warning-email
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}

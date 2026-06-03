@@ -117,6 +117,7 @@
   "monitor": {
     "target_team": "group7",
     "warehouse_inventory_threshold": 450,
+    "warehouse_inventory_threshold_enabled": false,
     "warning_minutes": 15,
     "send_report_every_run": true,
     "report_min_interval_minutes": 50,
@@ -124,23 +125,24 @@
     "alert_rules": [
       {
         "id": "warehouse_inventory_high",
-        "label": "Warehouse inventory checkpoint",
+        "enabled": false,
+        "label": "Legacy warehouse inventory checkpoint",
         "metric": "warehouse_inventory:warehouse",
         "operator": ">=",
         "threshold": 450,
         "severity": "warning",
-        "channels": ["warning", "hourly"],
-        "message": "Warehouse inventory reached the review checkpoint; evaluate against served-region demand before reducing stock."
+        "channels": ["hourly"],
+        "message": "Disabled legacy static checkpoint; active alerts use served-region coverage and game timing instead."
       },
       {
         "id": "warehouse_stockout_risk",
-        "label": "Warehouse stockout risk",
+        "label": "Warehouse stockout",
         "metric": "warehouse_inventory:warehouse",
         "operator": "<=",
-        "threshold": 50,
+        "threshold": 0,
         "severity": "critical",
         "channels": ["warning", "hourly"],
-        "message": "Warehouse inventory is very low; stockout risk is elevated."
+        "message": "Warehouse inventory is depleted; customer orders cannot be fulfilled without new stock."
       },
       {
         "id": "lost_demand_detected",
@@ -149,7 +151,7 @@
         "operator": ">",
         "threshold": 0,
         "severity": "critical",
-        "channels": ["hourly"],
+        "channels": ["warning", "hourly"],
         "message": "Lost demand is present across regions served by Calopeia; inspect supply and shipment timing."
       },
       {
@@ -164,33 +166,43 @@
       },
       {
         "id": "days_of_cover_low",
-        "label": "Days of cover low",
-        "metric": "derived:days_of_cover",
-        "operator": "<",
-        "threshold": 1,
-        "severity": "warning",
-        "channels": ["hourly"],
-        "message": "Warehouse coverage is below one demand day."
+        "label": "Served cover below dynamic minimum",
+        "metric": "derived:cover_shortage_gap",
+        "operator": ">",
+        "threshold": 0,
+        "severity": "critical",
+        "channels": ["warning", "hourly"],
+        "message": "Served-region coverage is below the dynamic minimum; avoid stockout while checking pipeline timing."
       },
       {
         "id": "days_of_cover_high",
-        "label": "Days of cover high",
-        "metric": "derived:days_of_cover",
+        "label": "Served cover above dynamic maximum",
+        "metric": "derived:cover_excess_gap",
         "operator": ">",
-        "threshold": 5,
+        "threshold": 0,
         "severity": "warning",
         "channels": ["hourly"],
-        "message": "Warehouse coverage is high; watch inventory carrying cost."
+        "message": "Served-region coverage is above the dynamic maximum; reduce only gradually to avoid bullwhip."
       },
       {
         "id": "shipments_below_demand",
         "label": "Shipments below demand",
-        "metric": "derived:shipment_to_demand_ratio",
-        "operator": "<",
-        "threshold": 0.8,
+        "metric": "derived:shipment_shortage_gap",
+        "operator": ">",
+        "threshold": 0,
         "severity": "warning",
         "channels": ["hourly"],
         "message": "Shipments are below demand; check fulfillment capacity."
+      },
+      {
+        "id": "endgame_obsolete_inventory_risk",
+        "label": "Endgame obsolete inventory risk",
+        "metric": "derived:endgame_excess_cover_gap",
+        "operator": ">",
+        "threshold": 0,
+        "severity": "warning",
+        "channels": ["hourly"],
+        "message": "Inventory cover exceeds remaining demand horizon; avoid creating obsolete inventory near day 1460."
       },
       {
         "id": "cash_lead_narrow",
@@ -257,8 +269,8 @@
       "days_of_cover_min": 2,
       "days_of_cover_max": 5,
       "days_of_cover_target": 3,
-      "warehouse_inventory_low": 50,
-      "warehouse_inventory_high": 450,
+      "warehouse_inventory_low": 0,
+      "warehouse_inventory_high": null,
       "lost_demand_max": 0,
       "shipment_to_demand_ratio_min": 0.9,
       "wip_to_demand_ratio_max": 3
