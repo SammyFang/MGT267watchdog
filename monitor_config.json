@@ -282,6 +282,7 @@
   },
   "email": {
     "enabled": true,
+    "game_entry_url": "https://op.responsive.net/sc/riverside267/entry.html",
     "recipients": [
       "950154@gmail.com",
       "wgong009@ucr.edu",

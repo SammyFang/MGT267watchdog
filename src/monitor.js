@@ -3837,6 +3837,7 @@ function buildReportText(config, record, standingReport, options = {}) {
     options.kind === "warning"
       ? `${options.warningMinutes || config.monitor.warning_minutes || 5}-minute warning`
       : "hourly report";
+  const gameEntryUrl = config.email?.game_entry_url || config.crawl.entry_url;
 
   return [
     `${options.test ? "[TEST] " : ""}${config.email.subject_prefix} ${reportName}`,
@@ -3850,6 +3851,7 @@ function buildReportText(config, record, standingReport, options = {}) {
     `Warehouse inventory day: ${record.warehouseDay}`,
     `Warehouse threshold: ${record.threshold}`,
     `Inventory alert: ${record.inventoryAlert ? "YES" : "no"}`,
+    `Game entry URL: ${gameEntryUrl}`,
     ...buildWatchlistLines(options.watchlist),
     "",
     "Recommendations",
@@ -3874,6 +3876,30 @@ function buildCard(label, value, accent = "#2563eb") {
     `<div style="font-size:20px;font-weight:700;color:#0f172a;margin-top:4px;">${escapeHtml(value)}</div>`,
     "</div>",
     "</td>",
+  ].join("");
+}
+
+function buildGameLinkHtml(config) {
+  const url = config.email?.game_entry_url || config.crawl.entry_url;
+
+  if (!url) {
+    return "";
+  }
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #bfdbfe;border-radius:8px;background:#eff6ff;">',
+    "<tr>",
+    '<td style="padding:14px 16px;">',
+    '<div style="font-size:13px;color:#1e3a8a;font-weight:700;margin-bottom:4px;">Supply Chain Game</div>',
+    `<div style="font-size:12px;color:#475569;">Open the game entry page to log in and adjust current operations.</div>`,
+    "</td>",
+    '<td style="padding:14px 16px;text-align:right;white-space:nowrap;">',
+    `<a href="${escapeHtml(url)}" style="display:inline-block;background:#1d4ed8;color:#ffffff;text-decoration:none;border-radius:6px;padding:10px 14px;font-size:13px;font-weight:700;">Open Game</a>`,
+    "</td>",
+    "</tr>",
+    "</table>",
+    "</div>",
   ].join("");
 }
 
@@ -4259,6 +4285,7 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     buildCard("Report type", isWarning ? `${minutes}-minute warning` : "hourly"),
     "</tr>",
     "</table>",
+    buildGameLinkHtml(config),
     buildWatchlistHtml(options.watchlist),
     buildRecommendationsHtml(options.recommendations),
     buildAdjustmentPlanHtml(options.adjustmentPlan),

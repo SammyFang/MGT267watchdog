@@ -18,6 +18,7 @@ Most settings are in `monitor_config.json`:
 - `auto_adjust`: research-only adjustment planner settings. It writes suggested policy changes to email, JSON/CSV, and Excel, but never submits game forms.
 - `backtest`: per-trigger backtest settings. It uses the plot data crawled during the current GitHub Actions run and has no local file dependency.
 - `email.recipients`: notification recipient list.
+- `email.game_entry_url`: clickable Supply Chain Game entry link included in every email.
 - `email.attach_excel`: attach the full data workbook to report emails.
 - `email.footer`: email footer text and URL.
 - `excel.exponential_smoothing_alpha`: alpha used by the Excel EMA formulas, currently `0.3`.
