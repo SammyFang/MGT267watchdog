@@ -44,5 +44,8 @@ jobs:
             .monitor-state/warehouse_inventory_latest.csv
             .monitor-state/standing_gaps_latest.csv
             .monitor-state/operational_snapshot_latest.csv
+            .monitor-state/policy_snapshot_latest.csv
+            .monitor-state/adjustment_plan_latest.json
+            .monitor-state/adjustment_plan_latest.csv
           if-no-files-found: error
           include-hidden-files: true

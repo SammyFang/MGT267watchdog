@@ -15,15 +15,20 @@ Most settings are in `monitor_config.json`:
 - `monitor.alert_rules`: editable watchlist rules for stockout risk, lost demand, days of cover, shipment coverage, and cash lead.
 - `monitor.metric_thresholds`: optional min/max alert thresholds for the hourly report's warehouse, factory, and headquarters metrics.
 - `ai.enabled`, `ai.model`, `ai.api_key_env`: Gemini recommendation settings.
+- `auto_adjust`: research-only adjustment planner settings. It writes suggested policy changes to email, JSON/CSV, and Excel, but never submits game forms.
 - `email.recipients`: notification recipient list.
 - `email.attach_excel`: attach the full data workbook to report emails.
 - `email.footer`: email footer text and URL.
 - `excel.exponential_smoothing_alpha`: alpha used by the Excel EMA formulas, currently `0.3`.
 - `crawl.plot_sources`: warehouse, factory, and headquarters plot URLs included in hourly reports.
+- `crawl.policy_pages`: headquarters, Calopeia factory, and Calopeia/Sorange/Tyran/Entworpe warehouse policy pages included in reports and Excel.
 
 Configured recipients:
 
 - `950154@gmail.com`
+- `wgong009@ucr.edu`
+- `hhuan238@ucr.edu`
+- `yfang097@ucr.edu`
 
 GitHub Actions schedules:
 
@@ -58,7 +63,7 @@ To download the latest full crawler workbook without sending email or changing t
 4. Open the completed run.
 5. Download the `latest-crawl-data` artifact.
 
-The artifact includes `supply_chain_data_latest.xlsx` plus the latest JSON/CSV outputs. This workflow does not restore or save the scheduled monitor cache.
+The artifact includes `supply_chain_data_latest.xlsx` plus the latest JSON/CSV outputs, including `policy_snapshot_latest.csv` and the research-only `adjustment_plan_latest` files. This workflow does not restore or save the scheduled monitor cache.
 
 ## Standing Gap Formula
 
@@ -148,6 +153,24 @@ Available metric keys:
 - `derived:wip_to_demand_ratio`
 - `derived:cash_lead_percent_vs_nearest`
 
+## Auto-Adjustment Research Plan
+
+`auto_adjust` is intentionally research-only. The code does not submit Factory or Warehouse forms, does not POST policy changes, and does not contain an apply mode. It uses scraped current policy values as the baseline when available, then falls back to `auto_adjust.policy_baseline`.
+
+Editable fields:
+
+- `auto_adjust.targets`: desired bands for days of cover, inventory, lost demand, shipment coverage, and WIP coverage.
+- `auto_adjust.max_change_per_run`: maximum suggested change per crawler run for `order_point` and `quantity`.
+- `auto_adjust.bounds`: min/max allowed values used when calculating suggested values.
+- `auto_adjust.policy_baseline`: current Factory and Warehouse policy values used as the baseline for suggested changes.
+
+Outputs:
+
+- Email section: `Auto-Adjustment Research Plan`
+- Excel tab: `Adjustment Plan`
+- JSON: `.monitor-state/adjustment_plan_latest.json`
+- CSV: `.monitor-state/adjustment_plan_latest.csv`
+
 ## Run Locally
 
 ```powershell
@@ -176,8 +199,10 @@ Hourly reports include:
 - factory WIP
 - headquarters demand, lost demand, and cash balance
 - current source values plus 1-hour change and 1-hour change rate when a previous hourly state exists
-- one `.xlsx` attachment with every scraped Data table in separate tabs, plus summary and standing tabs
+- current headquarters/factory/warehouse policy values from Calopeia plus Sorange/Tyran/Entworpe warehouse policy pages
+- one `.xlsx` attachment with every scraped Data table in separate tabs, plus summary, standing, and policy tabs
 - a `Watchlist` tab and EMA / Delta vs EMA formula columns on each Data tab
+- an `Adjustment Plan` tab with research-only suggested policy changes and safety flags
 
 The `Email Smoke Test` GitHub workflow sends one real test email with repository secrets:
 
@@ -198,6 +223,9 @@ Output files are written to `.monitor-state/`:
 - `warehouse_inventory_latest.csv`
 - `standing_gaps_latest.csv`
 - `operational_snapshot_latest.csv`
+- `policy_snapshot_latest.csv`
+- `adjustment_plan_latest.json`
+- `adjustment_plan_latest.csv`
 - `supply_chain_data_latest.xlsx`
 - `email_delivery_latest.json`
 

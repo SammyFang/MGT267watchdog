@@ -174,6 +174,205 @@ function stripTags(html) {
   return decodeHtml(html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "));
 }
 
+function htmlAttribute(html, name) {
+  const match = String(html || "").match(
+    new RegExp(`${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i"),
+  );
+
+  if (!match) {
+    return "";
+  }
+
+  return decodeHtml(match[1] || match[2] || match[3] || "");
+}
+
+function compactText(value) {
+  return decodeHtml(
+    String(value || "")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<br\s*\/?>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " "),
+  );
+}
+
+function selectedOption(selectHtml) {
+  const options = [...String(selectHtml || "").matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/gi)];
+
+  if (options.length === 0) {
+    return { value: "", text: "" };
+  }
+
+  const selected =
+    options.find((option) => /\bselected\b/i.test(option[1])) || options[0];
+
+  return {
+    value: htmlAttribute(selected[1], "value"),
+    text: compactText(selected[2]),
+  };
+}
+
+function cellTextWithControls(html) {
+  let normalized = String(html || "")
+    .replace(/<select\b[\s\S]*?<\/select>/gi, (selectHtml) => {
+      const selected = selectedOption(selectHtml);
+      return selected.text || selected.value;
+    })
+    .replace(/<input\b[^>]*>/gi, (inputHtml) => {
+      const type = htmlAttribute(inputHtml, "type").toLowerCase();
+      const value = htmlAttribute(inputHtml, "value");
+
+      if (type === "checkbox" || type === "radio") {
+        const checked = /\bchecked\b/i.test(inputHtml);
+        return `${checked ? "yes" : "no"}${value ? ` (${value})` : ""}`;
+      }
+
+      return value;
+    })
+    .replace(/<textarea\b[^>]*>([\s\S]*?)<\/textarea>/gi, (_match, text) =>
+      compactText(text),
+    );
+
+  return compactText(normalized);
+}
+
+function extractFormControls(html) {
+  const controls = [];
+  const forms = [...String(html || "").matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi)];
+
+  for (const [formIndex, formMatch] of forms.entries()) {
+    const formAttrs = formMatch[1];
+    const formHtml = formMatch[2];
+    const formAction = htmlAttribute(formAttrs, "action");
+    const formMethod = htmlAttribute(formAttrs, "method") || "GET";
+
+    for (const selectMatch of formHtml.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/gi)) {
+      const selected = selectedOption(selectMatch[0]);
+      controls.push({
+        formIndex: formIndex + 1,
+        formAction,
+        formMethod,
+        tag: "select",
+        name: htmlAttribute(selectMatch[1], "name"),
+        type: "select",
+        value: selected.value,
+        text: selected.text,
+        checked: "",
+      });
+    }
+
+    for (const inputMatch of formHtml.matchAll(/<input\b([^>]*)>/gi)) {
+      const attrs = inputMatch[1];
+      const type = htmlAttribute(attrs, "type") || "text";
+      controls.push({
+        formIndex: formIndex + 1,
+        formAction,
+        formMethod,
+        tag: "input",
+        name: htmlAttribute(attrs, "name"),
+        type,
+        value: htmlAttribute(attrs, "value"),
+        text: "",
+        checked:
+          type.toLowerCase() === "checkbox" || type.toLowerCase() === "radio"
+            ? /\bchecked\b/i.test(attrs)
+              ? "yes"
+              : "no"
+            : "",
+      });
+    }
+  }
+
+  return controls;
+}
+
+function inferPolicyTableLabel(rows) {
+  const text = rows.flat().join(" ").toLowerCase();
+
+  if (text.includes("warehouse location") && text.includes("shipping method")) {
+    return "Production and Shipping";
+  }
+
+  if (text.includes("factory location") && text.includes("shipping method")) {
+    return "Inbound Shipments from Factories";
+  }
+
+  if (text.includes("destination") && text.includes("fulfillment cost")) {
+    return "Outbound Shipments to Customers";
+  }
+
+  return "Table";
+}
+
+function extractHtmlTables(html) {
+  const tables = [];
+
+  for (const [index, match] of [
+    ...String(html || "").matchAll(/<table\b[^>]*>([\s\S]*?)<\/table>/gi),
+  ].entries()) {
+    const rows = [];
+
+    for (const rowMatch of match[1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
+      const cells = [
+        ...rowMatch[1].matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi),
+      ].map((cellMatch) => cellTextWithControls(cellMatch[1]));
+
+      if (cells.some((cell) => cell !== "")) {
+        rows.push(cells);
+      }
+    }
+
+    if (rows.length > 0) {
+      tables.push({
+        index: index + 1,
+        label: inferPolicyTableLabel(rows),
+        rows,
+      });
+    }
+  }
+
+  return tables;
+}
+
+function extractPolicyFacts(html) {
+  const text = compactText(html);
+  const patterns = [
+    /Revenue per drum is \$[\d,.]+/i,
+    /Each order must be filled within [^.]+?order is lost/i,
+    /Your fulfillment policy is currently set to [^.]+?\./i,
+    /Factory is operational with a current capacity of [\d.]+/i,
+    /No additional capacity is scheduled/i,
+    /Cost to produce a batch is \$[\d,.]+ \+ \(batch size\) x \(\$[\d,.]+\)/i,
+    /Warehouse is operational/i,
+    /Warehouse is under construction and will become operational in [^.]+?\./i,
+  ];
+  const facts = [];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+
+    if (match) {
+      facts.push(match[0].replace(/\s+/g, " ").trim());
+    }
+  }
+
+  return [...new Set(facts)];
+}
+
+function parsePolicyPageSnapshot(html, page) {
+  return {
+    id: page.id,
+    section: page.section,
+    region: page.region,
+    label: page.label,
+    url: page.url,
+    facts: extractPolicyFacts(html),
+    forms: extractFormControls(html),
+    tables: extractHtmlTables(html),
+  };
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -597,6 +796,576 @@ function buildOperationalSnapshotCsv(snapshot) {
   ].join("\r\n")}\r\n`;
 }
 
+function buildPolicySnapshotCsv(snapshot = []) {
+  const header = [
+    "page_id",
+    "section",
+    "region",
+    "page_label",
+    "item_type",
+    "form_index",
+    "table_index",
+    "row_index",
+    "column_index",
+    "name",
+    "type",
+    "value",
+    "text",
+    "checked",
+  ];
+  const rows = [];
+
+  for (const page of snapshot) {
+    for (const fact of page.facts || []) {
+      rows.push([
+        page.id,
+        page.section,
+        page.region,
+        page.label,
+        "fact",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        fact,
+        "",
+        "",
+      ]);
+    }
+
+    for (const control of page.forms || []) {
+      rows.push([
+        page.id,
+        page.section,
+        page.region,
+        page.label,
+        "form_control",
+        control.formIndex,
+        "",
+        "",
+        "",
+        control.name,
+        control.type,
+        control.value,
+        control.text,
+        control.checked,
+      ]);
+    }
+
+    for (const table of page.tables || []) {
+      for (const [rowIndex, row] of table.rows.entries()) {
+        for (const [columnIndex, value] of row.entries()) {
+          rows.push([
+            page.id,
+            page.section,
+            page.region,
+            page.label,
+            "table_cell",
+            "",
+            table.index,
+            rowIndex + 1,
+            columnIndex + 1,
+            table.label,
+            "",
+            value,
+            "",
+            "",
+          ]);
+        }
+      }
+    }
+  }
+
+  return `\uFEFF${[
+    header.map(csvValue).join(","),
+    ...rows.map((row) => row.map(csvValue).join(",")),
+  ].join("\r\n")}\r\n`;
+}
+
+function findPolicyPage(policySnapshot, id) {
+  return (policySnapshot || []).find((page) => page.id === id) || null;
+}
+
+function findPolicyControl(page, name) {
+  return (page?.forms || []).find((control) => control.name === name) || null;
+}
+
+function numericPolicyValue(control) {
+  if (!control) {
+    return undefined;
+  }
+
+  const value = Number(control.value);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function buildScrapedPolicyBaseline(policySnapshot) {
+  const factoryPage = findPolicyPage(policySnapshot, "factory_calopeia");
+  const warehousePage = findPolicyPage(policySnapshot, "warehouse_calopeia");
+  const factoryShip = findPolicyControl(factoryPage, "ship1");
+  const warehouseShip = findPolicyControl(warehousePage, "ship1");
+
+  return {
+    factory: {
+      shipping_method: factoryShip?.value,
+      shipping_method_text: factoryShip?.text,
+      order_point: numericPolicyValue(findPolicyControl(factoryPage, "point1")),
+      quantity: numericPolicyValue(findPolicyControl(factoryPage, "quant1")),
+      priority: numericPolicyValue(findPolicyControl(factoryPage, "priority1")),
+    },
+    warehouse: {
+      shipping_method: warehouseShip?.value,
+      shipping_method_text: warehouseShip?.text,
+      order_point: numericPolicyValue(findPolicyControl(warehousePage, "point1")),
+      quantity: numericPolicyValue(findPolicyControl(warehousePage, "quant1")),
+      priority: numericPolicyValue(findPolicyControl(warehousePage, "priority1")),
+    },
+  };
+}
+
+function mergePolicyBaseline(fallbackBaseline = {}, scrapedBaseline = {}) {
+  return {
+    factory: {
+      ...(fallbackBaseline.factory || {}),
+      ...Object.fromEntries(
+        Object.entries(scrapedBaseline.factory || {}).filter(
+          ([, value]) => value !== undefined && value !== "",
+        ),
+      ),
+    },
+    warehouse: {
+      ...(fallbackBaseline.warehouse || {}),
+      ...Object.fromEntries(
+        Object.entries(scrapedBaseline.warehouse || {}).filter(
+          ([, value]) => value !== undefined && value !== "",
+        ),
+      ),
+    },
+  };
+}
+
+function metricValue(metricCatalog, key) {
+  const metric = metricCatalog?.get(key);
+  return Number.isFinite(metric?.valueNumber) ? metric.valueNumber : null;
+}
+
+function metricRaw(metricCatalog, key) {
+  const metric = metricCatalog?.get(key);
+  return metric?.valueRaw || "";
+}
+
+function clamp(value, min, max) {
+  let next = value;
+
+  if (Number.isFinite(min)) {
+    next = Math.max(min, next);
+  }
+
+  if (Number.isFinite(max)) {
+    next = Math.min(max, next);
+  }
+
+  return next;
+}
+
+function roundedPolicyValue(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.max(0, Math.round(value));
+}
+
+function suggestPolicyNumber(current, direction, maxChange, min, max) {
+  if (!Number.isFinite(current)) {
+    return {
+      baseline: "",
+      suggested: "",
+      change: "",
+    };
+  }
+
+  if (direction === "hold") {
+    return {
+      baseline: String(current),
+      suggested: String(current),
+      change: "0",
+    };
+  }
+
+  const signedChange = direction === "increase" ? maxChange : -maxChange;
+  const suggested = roundedPolicyValue(clamp(current + signedChange, min, max));
+  const change = suggested - current;
+
+  return {
+    baseline: String(current),
+    suggested: String(suggested),
+    change: formatDelta(change),
+  };
+}
+
+function buildAutoAdjustmentPlan(
+  config,
+  metricCatalog,
+  record,
+  standingReport,
+  policySnapshot = [],
+) {
+  const cfg = config.auto_adjust || {};
+  const enabled = cfg.enabled !== false;
+  const mode = cfg.mode || "research_only";
+  const targets = cfg.targets || {};
+  const maxChange = cfg.max_change_per_run || {};
+  const bounds = cfg.bounds || {};
+  const scrapedBaseline = buildScrapedPolicyBaseline(policySnapshot);
+  const baseline = mergePolicyBaseline(cfg.policy_baseline || {}, scrapedBaseline);
+  const recommendations = [];
+
+  const demand = metricValue(metricCatalog, "hq_demand:Calopeia");
+  const shipments = metricValue(metricCatalog, "warehouse_shipments:Calopeia");
+  const lostDemand = metricValue(metricCatalog, "hq_lost_demand:Calopeia");
+  const wip = metricValue(metricCatalog, "factory_wip:Calopeia");
+  const daysOfCover = metricValue(metricCatalog, "derived:days_of_cover");
+  const shipmentRatio = metricValue(
+    metricCatalog,
+    "derived:shipment_to_demand_ratio",
+  );
+  const lostDemandRate = metricValue(metricCatalog, "derived:lost_demand_rate");
+  const cashLead = metricValue(
+    metricCatalog,
+    "derived:cash_lead_percent_vs_nearest",
+  );
+
+  const daysMin = Number(targets.days_of_cover_min ?? 2);
+  const daysMax = Number(targets.days_of_cover_max ?? 7);
+  const daysTarget = Number(
+    targets.days_of_cover_target ?? (daysMin + daysMax) / 2,
+  );
+  const inventoryLow = Number(targets.warehouse_inventory_low ?? 50);
+  const inventoryHigh = Number(
+    targets.warehouse_inventory_high ?? config.monitor.warehouse_inventory_threshold,
+  );
+  const lostDemandMax = Number(targets.lost_demand_max ?? 0);
+  const shipmentRatioMin = Number(targets.shipment_to_demand_ratio_min ?? 0.9);
+  const wipRatioMax = Number(targets.wip_to_demand_ratio_max ?? 3);
+  const orderPointStep = Number(maxChange.order_point ?? 25);
+  const quantityStep = Number(maxChange.quantity ?? 25);
+  const pointMin = Number(bounds.order_point_min ?? 0);
+  const pointMax = Number(bounds.order_point_max ?? 999999);
+  const quantityMin = Number(bounds.quantity_min ?? 0);
+  const quantityMax = Number(bounds.quantity_max ?? 999999);
+  const factory = baseline.factory || {};
+  const warehouse = baseline.warehouse || {};
+  const targetInventory =
+    Number.isFinite(demand) && demand > 0 && Number.isFinite(daysTarget)
+      ? roundedPolicyValue(demand * daysTarget)
+      : null;
+  const excessCoverage =
+    (Number.isFinite(daysOfCover) && daysOfCover > daysMax) ||
+    record.warehouseInventory >= inventoryHigh;
+  const shortageRisk =
+    (Number.isFinite(lostDemand) && lostDemand > lostDemandMax) ||
+    (Number.isFinite(daysOfCover) && daysOfCover < daysMin) ||
+    record.warehouseInventory <= inventoryLow;
+  const shipmentBelowDemand =
+    Number.isFinite(shipmentRatio) && shipmentRatio < shipmentRatioMin;
+  const wipRatio =
+    Number.isFinite(wip) && Number.isFinite(demand) && demand > 0
+      ? wip / demand
+      : null;
+
+  function addRecommendation({
+    area,
+    parameter,
+    baselineValue,
+    suggestedValue,
+    direction,
+    urgency,
+    confidence,
+    reason,
+    change = "",
+  }) {
+    recommendations.push({
+      area,
+      parameter,
+      baseline: baselineValue === undefined ? "" : String(baselineValue),
+      suggested: suggestedValue === undefined ? "" : String(suggestedValue),
+      change,
+      direction,
+      urgency,
+      confidence,
+      reason,
+      submit_allowed: false,
+    });
+  }
+
+  function addNumericPolicy(area, parameter, current, direction, step, reason) {
+    const suggested = suggestPolicyNumber(
+      Number(current),
+      direction,
+      step,
+      parameter === "quantity" ? quantityMin : pointMin,
+      parameter === "quantity" ? quantityMax : pointMax,
+    );
+    addRecommendation({
+      area,
+      parameter,
+      baselineValue: suggested.baseline,
+      suggestedValue: suggested.suggested,
+      change: suggested.change,
+      direction,
+      urgency: direction === "hold" ? "low" : shortageRisk ? "high" : "medium",
+      confidence: Number.isFinite(current) ? "medium" : "low",
+      reason,
+    });
+  }
+
+  if (!enabled) {
+    return {
+      enabled: false,
+      mode,
+      generated_at: record.checkedAt,
+      generated_at_local: record.checkedAtLocal,
+      safety: {
+        research_only: true,
+        game_updates_enabled: false,
+        submit_allowed: false,
+        note: "Auto-adjustment research is disabled; no game-setting changes are possible.",
+      },
+      inputs: {},
+      targets,
+      recommendations,
+    };
+  }
+
+  const posture = shortageRisk ? "shortage_risk" : excessCoverage ? "excess_stock" : "balanced";
+  const inventoryReason = [
+    `inventory ${record.warehouseInventory}`,
+    Number.isFinite(daysOfCover) ? `days of cover ${formatMetricNumber(daysOfCover, "days")}` : "",
+    Number.isFinite(demand) ? `demand ${metricRaw(metricCatalog, "hq_demand:Calopeia")}` : "",
+    Number.isFinite(lostDemand)
+      ? `lost demand ${metricRaw(metricCatalog, "hq_lost_demand:Calopeia")}`
+      : "",
+    targetInventory !== null ? `target inventory near ${targetInventory}` : "",
+  ]
+    .filter(Boolean)
+    .join("; ");
+
+  if (posture === "shortage_risk") {
+    addNumericPolicy(
+      "factory",
+      "order_point",
+      factory.order_point,
+      "increase",
+      orderPointStep,
+      `Shortage risk detected; ${inventoryReason}.`,
+    );
+    addNumericPolicy(
+      "factory",
+      "quantity",
+      factory.quantity,
+      "increase",
+      quantityStep,
+      `Raise replenishment cautiously until coverage returns to ${daysMin}-${daysMax} days.`,
+    );
+    addNumericPolicy(
+      "warehouse",
+      "order_point",
+      warehouse.order_point,
+      "increase",
+      orderPointStep,
+      `Warehouse coverage is below target or lost demand is present; ${inventoryReason}.`,
+    );
+    addNumericPolicy(
+      "warehouse",
+      "quantity",
+      warehouse.quantity,
+      "increase",
+      quantityStep,
+      "Increase outbound replenishment planning only after confirming inventory is available.",
+    );
+  } else if (posture === "excess_stock") {
+    addNumericPolicy(
+      "factory",
+      "order_point",
+      factory.order_point,
+      "decrease",
+      orderPointStep,
+      `Inventory coverage is above target; ${inventoryReason}.`,
+    );
+    addNumericPolicy(
+      "factory",
+      "quantity",
+      factory.quantity,
+      "decrease",
+      quantityStep,
+      "Reduce new inbound pressure to avoid holding excess stock.",
+    );
+    addNumericPolicy(
+      "warehouse",
+      "order_point",
+      warehouse.order_point,
+      "decrease",
+      orderPointStep,
+      `Warehouse has excess cover relative to the ${daysMin}-${daysMax} day target.`,
+    );
+    addNumericPolicy(
+      "warehouse",
+      "quantity",
+      warehouse.quantity,
+      "decrease",
+      quantityStep,
+      "Keep outbound settings conservative until stock cover normalizes.",
+    );
+  } else {
+    addNumericPolicy(
+      "factory",
+      "order_point",
+      factory.order_point,
+      "hold",
+      orderPointStep,
+      `Coverage is within the configured target band; ${inventoryReason}.`,
+    );
+    addNumericPolicy(
+      "factory",
+      "quantity",
+      factory.quantity,
+      "hold",
+      quantityStep,
+      "No immediate production policy correction is indicated.",
+    );
+    addNumericPolicy(
+      "warehouse",
+      "order_point",
+      warehouse.order_point,
+      "hold",
+      orderPointStep,
+      "Warehouse policy appears stable against current demand and inventory.",
+    );
+  }
+
+  if (shipmentBelowDemand && !shortageRisk) {
+    addNumericPolicy(
+      "warehouse",
+      "quantity",
+      warehouse.quantity,
+      "increase",
+      quantityStep,
+      `Shipments trail demand; shipment/demand ratio is ${formatMetricNumber(shipmentRatio, "ratio")}.`,
+    );
+  }
+
+  if (Number.isFinite(wipRatio) && wipRatio > wipRatioMax && !shortageRisk) {
+    addNumericPolicy(
+      "factory",
+      "quantity",
+      factory.quantity,
+      "decrease",
+      quantityStep,
+      `Factory WIP is high versus demand; WIP/demand ratio is ${formatMetricNumber(wipRatio, "ratio")}.`,
+    );
+  }
+
+  const cashLeadRule = (config.monitor?.alert_rules || []).find(
+    (rule) => rule.id === "cash_lead_narrow",
+  );
+  const cashLeadThreshold = Number(cashLeadRule?.threshold ?? 5);
+
+  if (Number.isFinite(cashLead) && cashLead < cashLeadThreshold) {
+    addRecommendation({
+      area: "cash",
+      parameter: "risk_posture",
+      baselineValue: "normal",
+      suggestedValue: "conservative",
+      direction: "tighten",
+      urgency: "medium",
+      confidence: "medium",
+      reason: `Cash lead over the nearest competitor is ${formatMetricNumber(cashLead, "%")}; prefer smaller policy moves until lead improves.`,
+    });
+  }
+
+  return {
+    enabled: true,
+    mode,
+    generated_at: record.checkedAt,
+    generated_at_local: record.checkedAtLocal,
+    target_team: record.targetTeam,
+    dashboard_day: record.dashboardDay,
+    posture,
+    safety: {
+      research_only: true,
+      game_updates_enabled: false,
+      submit_allowed: false,
+      note: "This planner only writes recommendations to reports and files. It never submits Factory or Warehouse game forms.",
+    },
+    inputs: {
+      warehouse_inventory: record.warehouseInventory,
+      warehouse_inventory_day: record.warehouseDay,
+      demand,
+      shipments,
+      lost_demand: lostDemand,
+      lost_demand_rate: lostDemandRate,
+      factory_wip: wip,
+      days_of_cover: daysOfCover,
+      shipment_to_demand_ratio: shipmentRatio,
+      cash_lead_percent_vs_nearest: cashLead,
+      target_inventory: targetInventory,
+      target_rank: standingReport.target.rank,
+      target_cash: standingReport.target.cash,
+      baseline_source:
+        scrapedBaseline.factory?.order_point !== undefined ||
+        scrapedBaseline.warehouse?.order_point !== undefined
+          ? "scraped policy pages"
+          : "monitor_config fallback",
+    },
+    targets: {
+      days_of_cover_min: daysMin,
+      days_of_cover_max: daysMax,
+      days_of_cover_target: daysTarget,
+      warehouse_inventory_low: inventoryLow,
+      warehouse_inventory_high: inventoryHigh,
+      lost_demand_max: lostDemandMax,
+      shipment_to_demand_ratio_min: shipmentRatioMin,
+      wip_to_demand_ratio_max: wipRatioMax,
+    },
+    recommendations,
+  };
+}
+
+function buildAdjustmentPlanCsv(plan) {
+  const header = [
+    "area",
+    "parameter",
+    "baseline",
+    "suggested",
+    "change",
+    "direction",
+    "urgency",
+    "confidence",
+    "reason",
+    "submit_allowed",
+  ];
+  const rows = (plan?.recommendations || []).map((item) => [
+    item.area,
+    item.parameter,
+    item.baseline,
+    item.suggested,
+    item.change,
+    item.direction,
+    item.urgency,
+    item.confidence,
+    item.reason,
+    item.submit_allowed ? "yes" : "no",
+  ]);
+
+  return `\uFEFF${[
+    header.map(csvValue).join(","),
+    ...rows.map((row) => row.map(csvValue).join(",")),
+  ].join("\r\n")}\r\n`;
+}
+
 function addSummaryWorksheet(workbook, usedNames, config, record) {
   const worksheet = workbook.addWorksheet(safeWorksheetName("Summary", usedNames));
   const alpha = Number(config.excel?.exponential_smoothing_alpha ?? 0.3);
@@ -664,6 +1433,164 @@ function addWatchlistWorksheet(workbook, usedNames, watchlist = []) {
 
     if (item.isAlert) {
       row.getCell(9).font = { bold: true, color: { argb: "FFB91C1C" } };
+    }
+  }
+
+  styleWorksheet(worksheet);
+}
+
+function addAdjustmentPlanWorksheet(workbook, usedNames, plan) {
+  const recommendations = plan?.recommendations || [];
+
+  if (recommendations.length === 0) {
+    return;
+  }
+
+  const worksheet = workbook.addWorksheet(
+    safeWorksheetName("Adjustment Plan", usedNames),
+  );
+
+  worksheet.addRow(["Field", "Value"]);
+  worksheet.addRow(["Mode", plan.mode || "research_only"]);
+  worksheet.addRow(["Posture", plan.posture || "n/a"]);
+  worksheet.addRow(["Generated at", plan.generated_at_local || plan.generated_at || ""]);
+  worksheet.addRow(["Game updates enabled", "no"]);
+  worksheet.addRow(["Submit allowed", "no"]);
+  worksheet.addRow(["Safety note", plan.safety?.note || "Research-only planner"]);
+  worksheet.addRow([]);
+  worksheet.addRow([
+    "area",
+    "parameter",
+    "baseline",
+    "suggested",
+    "change",
+    "direction",
+    "urgency",
+    "confidence",
+    "reason",
+    "submit_allowed",
+  ]);
+
+  for (const item of recommendations) {
+    worksheet.addRow([
+      item.area,
+      item.parameter,
+      item.baseline,
+      item.suggested,
+      item.change,
+      item.direction,
+      item.urgency,
+      item.confidence,
+      item.reason,
+      item.submit_allowed ? "yes" : "no",
+    ]);
+  }
+
+  styleWorksheet(worksheet);
+  worksheet.getRow(9).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  worksheet.getRow(9).fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF1F2937" },
+  };
+}
+
+function addPolicySummaryWorksheet(workbook, usedNames, policySnapshot = []) {
+  if (!policySnapshot.length) {
+    return;
+  }
+
+  const worksheet = workbook.addWorksheet(
+    safeWorksheetName("Policy Summary", usedNames),
+  );
+  worksheet.addRow([
+    "page_id",
+    "section",
+    "region",
+    "page_label",
+    "item_type",
+    "form_index",
+    "name",
+    "type",
+    "value",
+    "text",
+    "checked",
+  ]);
+
+  for (const page of policySnapshot) {
+    for (const fact of page.facts || []) {
+      worksheet.addRow([
+        page.id,
+        page.section,
+        page.region,
+        page.label,
+        "fact",
+        "",
+        "",
+        "",
+        fact,
+        "",
+        "",
+      ]);
+    }
+
+    for (const control of page.forms || []) {
+      worksheet.addRow([
+        page.id,
+        page.section,
+        page.region,
+        page.label,
+        "form_control",
+        control.formIndex,
+        control.name,
+        control.type,
+        control.value,
+        control.text,
+        control.checked,
+      ]);
+    }
+  }
+
+  styleWorksheet(worksheet);
+}
+
+function addPolicyTablesWorksheet(workbook, usedNames, policySnapshot = []) {
+  if (!policySnapshot.length) {
+    return;
+  }
+
+  const worksheet = workbook.addWorksheet(
+    safeWorksheetName("Policy Tables", usedNames),
+  );
+  worksheet.addRow([
+    "page_id",
+    "section",
+    "region",
+    "page_label",
+    "table_index",
+    "table_label",
+    "row_index",
+    "column_index",
+    "value",
+  ]);
+
+  for (const page of policySnapshot) {
+    for (const table of page.tables || []) {
+      for (const [rowIndex, row] of table.rows.entries()) {
+        for (const [columnIndex, value] of row.entries()) {
+          worksheet.addRow([
+            page.id,
+            page.section,
+            page.region,
+            page.label,
+            table.index,
+            table.label,
+            rowIndex + 1,
+            columnIndex + 1,
+            value,
+          ]);
+        }
+      }
     }
   }
 
@@ -795,9 +1722,21 @@ async function buildDataWorkbookBuffer(
     buildMetricCatalog(config, record, standingReport, operationalSnapshot);
   const watchlist =
     options.watchlist || buildWatchlist(config, metricCatalog, "hourly");
+  const adjustmentPlan =
+    options.adjustmentPlan ||
+    buildAutoAdjustmentPlan(
+      config,
+      metricCatalog,
+      record,
+      standingReport,
+      options.policySnapshot,
+    );
 
   addSummaryWorksheet(workbook, usedNames, config, record);
   addWatchlistWorksheet(workbook, usedNames, watchlist);
+  addAdjustmentPlanWorksheet(workbook, usedNames, adjustmentPlan);
+  addPolicySummaryWorksheet(workbook, usedNames, options.policySnapshot || []);
+  addPolicyTablesWorksheet(workbook, usedNames, options.policySnapshot || []);
 
   for (const plot of plotSnapshots) {
     addPlotDataWorksheet(workbook, usedNames, plot, Number.isFinite(alpha) ? alpha : 0.3);
@@ -1139,6 +2078,64 @@ function buildOperationalLines(snapshot) {
           ].join(" | "),
         );
       }
+    }
+  }
+
+  return lines;
+}
+
+function buildAdjustmentPlanLines(plan) {
+  const recommendations = plan?.recommendations || [];
+
+  if (recommendations.length === 0) {
+    return [];
+  }
+
+  return [
+    "",
+    "Auto-Adjustment Research Plan",
+    `Mode: ${plan.mode || "research_only"} | submit_allowed: no`,
+    `Posture: ${plan.posture || "n/a"}`,
+    ...(plan.safety?.note ? [`Safety: ${plan.safety.note}`] : []),
+    ...recommendations.map((item) =>
+      [
+        item.area,
+        item.parameter,
+        `baseline ${item.baseline || "n/a"}`,
+        `suggested ${item.suggested || "n/a"}`,
+        `change ${item.change || "n/a"}`,
+        item.direction,
+        item.urgency,
+        item.reason,
+      ].join(" | "),
+    ),
+  ];
+}
+
+function buildPolicyLines(policySnapshot = []) {
+  if (!policySnapshot.length) {
+    return [];
+  }
+
+  const lines = ["", "Policy Snapshot"];
+
+  for (const page of policySnapshot) {
+    lines.push(`[${page.region || page.section}] ${page.label}`);
+
+    for (const fact of (page.facts || []).slice(0, 3)) {
+      lines.push(`- ${fact}`);
+    }
+
+    const controls = (page.forms || [])
+      .filter((control) =>
+        ["ship1", "point1", "quant1", "priority1", "policy"].includes(control.name),
+      )
+      .map((control) =>
+        `${control.name}=${control.text || control.value || control.checked || "n/a"}`,
+      );
+
+    if (controls.length) {
+      lines.push(`- ${controls.join(" | ")}`);
     }
   }
 
@@ -1745,8 +2742,10 @@ function buildReportText(config, record, standingReport, options = {}) {
     "Recommendations",
     ...((options.recommendations?.items || []).map((item) => `- ${item}`)),
     `Source: ${options.recommendations?.source || "n/a"}`,
+    ...buildAdjustmentPlanLines(options.adjustmentPlan),
     ...buildMetricAlertLines(options.metricAlerts),
     ...buildOperationalLines(options.operationalSnapshot),
+    ...buildPolicyLines(options.policySnapshot),
     "",
     "Rank | Team | Cash | Gap amount | Gap percent",
     ...buildStandingLines(standingReport),
@@ -1853,6 +2852,45 @@ function buildOperationalSnapshotHtml(snapshot) {
   ].join("");
 }
 
+function buildPolicySnapshotHtml(policySnapshot = []) {
+  if (!policySnapshot.length) {
+    return "";
+  }
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Policy Snapshot</div>',
+    '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #d8dee9;border-radius:8px;overflow:hidden;font-size:13px;">',
+    '<thead><tr style="background:#e2e8f0;color:#334155;">',
+    '<th style="padding:9px;text-align:left;">Area</th>',
+    '<th style="padding:9px;text-align:left;">Status / Policy</th>',
+    '<th style="padding:9px;text-align:left;">Current Parameters</th>',
+    "</tr></thead>",
+    "<tbody>",
+    ...policySnapshot.map((page) => {
+      const controls = (page.forms || [])
+        .filter((control) =>
+          ["ship1", "point1", "quant1", "priority1", "policy"].includes(control.name),
+        )
+        .map((control) =>
+          `${control.name}: ${control.text || control.value || control.checked || "n/a"}`,
+        );
+      const factText = (page.facts || []).slice(0, 2).join(" ");
+
+      return [
+        "<tr>",
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;font-weight:700;">${escapeHtml(`${page.region || page.section} ${page.label}`)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(factText || "n/a")}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(controls.join(" | ") || "n/a")}</td>`,
+        "</tr>",
+      ].join("");
+    }),
+    "</tbody>",
+    "</table>",
+    "</div>",
+  ].join("");
+}
+
 function buildRecommendationsHtml(recommendations) {
   const items = recommendations?.items || [];
 
@@ -1869,6 +2907,56 @@ function buildRecommendationsHtml(recommendations) {
     "</ol>",
     `<div style="font-size:11px;color:#64748b;margin-top:8px;">Source: ${escapeHtml(recommendations.source || "n/a")}</div>`,
     "</div>",
+    "</div>",
+  ].join("");
+}
+
+function buildAdjustmentPlanHtml(plan) {
+  const recommendations = plan?.recommendations || [];
+
+  if (recommendations.length === 0) {
+    return "";
+  }
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Auto-Adjustment Research Plan</div>',
+    '<div style="border:1px solid #fed7aa;border-radius:8px;background:#fff7ed;padding:10px 12px;margin-bottom:10px;color:#9a3412;font-size:13px;line-height:1.45;">',
+    `<strong>Research-only:</strong> ${escapeHtml(plan.safety?.note || "No game forms are submitted.")}`,
+    "</div>",
+    '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #d8dee9;border-radius:8px;overflow:hidden;font-size:13px;">',
+    '<thead><tr style="background:#e2e8f0;color:#334155;">',
+    '<th style="padding:9px;text-align:left;">Area</th>',
+    '<th style="padding:9px;text-align:left;">Parameter</th>',
+    '<th style="padding:9px;text-align:right;">Baseline</th>',
+    '<th style="padding:9px;text-align:right;">Suggested</th>',
+    '<th style="padding:9px;text-align:right;">Change</th>',
+    '<th style="padding:9px;text-align:left;">Direction</th>',
+    '<th style="padding:9px;text-align:left;">Reason</th>',
+    "</tr></thead>",
+    "<tbody>",
+    ...recommendations.map((item) => {
+      const directionColor =
+        item.direction === "increase"
+          ? "#047857"
+          : item.direction === "decrease"
+            ? "#b91c1c"
+            : "#334155";
+
+      return [
+        "<tr>",
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;font-weight:700;">${escapeHtml(item.area)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(item.parameter)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(item.baseline || "n/a")}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:700;">${escapeHtml(item.suggested || "n/a")}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(item.change || "n/a")}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;color:${directionColor};font-weight:700;">${escapeHtml(item.direction)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(item.reason)}</td>`,
+        "</tr>",
+      ].join("");
+    }),
+    "</tbody>",
+    "</table>",
     "</div>",
   ].join("");
 }
@@ -2013,8 +3101,10 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     "</table>",
     buildWatchlistHtml(options.watchlist),
     buildRecommendationsHtml(options.recommendations),
+    buildAdjustmentPlanHtml(options.adjustmentPlan),
     buildMetricAlertsHtml(options.metricAlerts),
     !isWarning ? buildOperationalSnapshotHtml(options.operationalSnapshot) : "",
+    !isWarning ? buildPolicySnapshotHtml(options.policySnapshot) : "",
     '<div style="padding:0 22px 18px;">',
     '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Team Standing</div>',
     '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #d8dee9;border-radius:8px;overflow:hidden;font-size:14px;">',
@@ -2061,12 +3151,23 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
       watchlist,
       metricAlerts,
     }));
+  const adjustmentPlan =
+    options.adjustmentPlan ??
+    buildAutoAdjustmentPlan(
+      config,
+      metricCatalog,
+      record,
+      standingReport,
+      options.policySnapshot,
+    );
   const renderOptions = {
     ...options,
     metricCatalog,
     watchlist,
     metricAlerts,
     recommendations,
+    adjustmentPlan,
+    policySnapshot: options.policySnapshot || [],
   };
   const subject = buildEmailSubject(config, record, renderOptions);
   const text = buildReportText(config, record, standingReport, renderOptions);
@@ -2083,6 +3184,7 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
         metricCatalog,
         watchlist,
         operationalSnapshot: options.operationalSnapshot,
+        adjustmentPlan,
       },
     );
 
@@ -2113,6 +3215,11 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
     }
     for (const item of recommendations.items) {
       console.log(`- ${item}`);
+    }
+    for (const item of adjustmentPlan.recommendations || []) {
+      console.log(
+        `Adjustment research: ${item.area}.${item.parameter} ${item.baseline || "n/a"} -> ${item.suggested || "n/a"} (${item.direction})`,
+      );
     }
     return false;
   }
@@ -2254,6 +3361,21 @@ async function crawl(config, options = {}) {
     }
   }
 
+  const policySnapshot = [];
+
+  if (options.includePolicyPages !== false) {
+    for (const page of config.crawl.policy_pages || []) {
+      const pageResponse = await request(page.url, { method: "GET" }, cookieJar);
+      const pageHtml = await pageResponse.text();
+
+      if (!pageResponse.ok) {
+        throw new Error(`${page.label} policy page failed with HTTP ${pageResponse.status}`);
+      }
+
+      policySnapshot.push(parsePolicyPageSnapshot(pageHtml, page));
+    }
+  }
+
   const standingResponse = await request(
     config.crawl.standing_url,
     { method: "POST" },
@@ -2271,6 +3393,7 @@ async function crawl(config, options = {}) {
     dashboard,
     inventoryTable,
     plotSnapshots,
+    policySnapshot,
     standingReport,
   };
 }
@@ -2314,6 +3437,21 @@ async function runOnce(config) {
     process.cwd(),
     config.output.operational_snapshot_csv,
   );
+  const policySnapshotCsvPath = path.resolve(
+    process.cwd(),
+    config.output.policy_snapshot_csv ||
+      ".monitor-state/policy_snapshot_latest.csv",
+  );
+  const adjustmentPlanJsonPath = path.resolve(
+    process.cwd(),
+    config.output.adjustment_plan_json ||
+      ".monitor-state/adjustment_plan_latest.json",
+  );
+  const adjustmentPlanCsvPath = path.resolve(
+    process.cwd(),
+    config.output.adjustment_plan_csv ||
+      ".monitor-state/adjustment_plan_latest.csv",
+  );
   const dataWorkbookPath = path.resolve(
     process.cwd(),
     config.output.data_workbook_xlsx,
@@ -2321,7 +3459,7 @@ async function runOnce(config) {
   ensureDir(path.resolve(process.cwd(), config.output.state_dir));
 
   const previousState = readJson(statePath, {});
-  const { dashboard, inventoryTable, plotSnapshots, standingReport } =
+  const { dashboard, inventoryTable, plotSnapshots, standingReport, policySnapshot } =
     await crawl(config);
   const operationalSnapshot = buildOperationalSnapshot(
     plotSnapshots,
@@ -2338,6 +3476,13 @@ async function runOnce(config) {
     operationalSnapshot,
   );
   const watchlist = buildWatchlist(config, metricCatalog, "hourly");
+  const adjustmentPlan = buildAutoAdjustmentPlan(
+    config,
+    metricCatalog,
+    record,
+    standingReport,
+    policySnapshot,
+  );
   let emailSent = false;
   const reportDecision = shouldSendReportNow(config, previousState);
 
@@ -2347,6 +3492,8 @@ async function runOnce(config) {
       plotSnapshots,
       metricCatalog,
       watchlist,
+      adjustmentPlan,
+      policySnapshot,
     });
   } else if (config.monitor.send_report_every_run) {
     console.log(`Email report skipped: ${reportDecision.reason}`);
@@ -2359,6 +3506,21 @@ async function runOnce(config) {
     buildOperationalSnapshotCsv(operationalSnapshot),
     "utf8",
   );
+  fs.writeFileSync(
+    policySnapshotCsvPath,
+    buildPolicySnapshotCsv(policySnapshot),
+    "utf8",
+  );
+  fs.writeFileSync(
+    adjustmentPlanJsonPath,
+    `${JSON.stringify(adjustmentPlan, null, 2)}\n`,
+    "utf8",
+  );
+  fs.writeFileSync(
+    adjustmentPlanCsvPath,
+    buildAdjustmentPlanCsv(adjustmentPlan),
+    "utf8",
+  );
   const workbookWritten = await writeDataWorkbookFile(
     config,
     record,
@@ -2369,6 +3531,8 @@ async function runOnce(config) {
       operationalSnapshot,
       metricCatalog,
       watchlist,
+      adjustmentPlan,
+      policySnapshot,
     },
   );
   appendHistory(historyPath, { ...record, emailSent });
@@ -2391,6 +3555,8 @@ async function runOnce(config) {
         last_inventory_alert: record.inventoryAlert,
         last_alerts: watchlist.filter((item) => item.isAlert),
         last_operational_metrics: operationalSnapshot.metrics,
+        last_adjustment_plan: adjustmentPlan,
+        last_policy_pages: policySnapshot,
         last_email_sent_at: emailSent
           ? checkedAt
           : previousState.last_email_sent_at || null,
@@ -2420,6 +3586,8 @@ async function runOnce(config) {
   console.log(`History: ${historyPath}`);
   console.log(`Standing gaps: ${standingCsvPath}`);
   console.log(`Operational snapshot: ${operationalCsvPath}`);
+  console.log(`Policy snapshot: ${policySnapshotCsvPath}`);
+  console.log(`Adjustment plan: ${adjustmentPlanJsonPath}`);
   console.log(
     `Excel data workbook: ${workbookWritten ? dataWorkbookPath : "not written"}`,
   );
@@ -2447,7 +3615,7 @@ async function sendTestEmails(config) {
     path.resolve(process.cwd(), config.output.latest_json),
     {},
   );
-  const { dashboard, inventoryTable, plotSnapshots, standingReport } =
+  const { dashboard, inventoryTable, plotSnapshots, standingReport, policySnapshot } =
     await crawl(config);
   const operationalSnapshot = buildOperationalSnapshot(
     plotSnapshots,
@@ -2463,6 +3631,7 @@ async function sendTestEmails(config) {
     test: true,
     operationalSnapshot,
     plotSnapshots,
+    policySnapshot,
   });
 
   console.log("Test email summary:");
@@ -2476,7 +3645,7 @@ async function sendTestEmails(config) {
 
 async function sendWarningEmail(config) {
   const warningMinutes = Number(config.monitor.warning_minutes || 15);
-  const { dashboard, inventoryTable, plotSnapshots, standingReport } =
+  const { dashboard, inventoryTable, plotSnapshots, standingReport, policySnapshot } =
     await crawl(config);
   const operationalSnapshot = buildOperationalSnapshot(plotSnapshots, {});
   const record = createRecord(config, dashboard, inventoryTable, standingReport);
@@ -2500,6 +3669,7 @@ async function sendWarningEmail(config) {
         warningMinutes,
         operationalSnapshot,
         plotSnapshots,
+        policySnapshot,
         metricCatalog,
         watchlist,
         metricAlerts: warningAlerts,

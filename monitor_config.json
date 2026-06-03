@@ -43,6 +43,50 @@
         "label": "Cash Balance",
         "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+cash+balance&data=BALANCE"
       }
+    ],
+    "policy_pages": [
+      {
+        "id": "headquarters_calopeia",
+        "section": "Headquarters",
+        "region": "Calopeia",
+        "label": "Headquarters",
+        "url": "https://op.responsive.net/SupplyChain/SCCorp?submit=change"
+      },
+      {
+        "id": "factory_calopeia",
+        "section": "Factory",
+        "region": "Calopeia",
+        "label": "Factory",
+        "url": "https://op.responsive.net/SupplyChain/SCFactory?action=change&region=1"
+      },
+      {
+        "id": "warehouse_calopeia",
+        "section": "Warehouse",
+        "region": "Calopeia",
+        "label": "Warehouse",
+        "url": "https://op.responsive.net/SupplyChain/SCWarehouse?submit=change&region=1"
+      },
+      {
+        "id": "warehouse_sorange",
+        "section": "Warehouse",
+        "region": "Sorange",
+        "label": "Warehouse",
+        "url": "https://op.responsive.net/SupplyChain/SCWarehouse?submit=change&region=2"
+      },
+      {
+        "id": "warehouse_tyran",
+        "section": "Warehouse",
+        "region": "Tyran",
+        "label": "Warehouse",
+        "url": "https://op.responsive.net/SupplyChain/SCWarehouse?submit=change&region=3"
+      },
+      {
+        "id": "warehouse_entworpe",
+        "section": "Warehouse",
+        "region": "Entworpe",
+        "label": "Warehouse",
+        "url": "https://op.responsive.net/SupplyChain/SCWarehouse?submit=change&region=4"
+      }
     ]
   },
   "credentials": {
@@ -55,7 +99,7 @@
     "target_team": "group7",
     "warehouse_inventory_threshold": 450,
     "warning_minutes": 15,
-    "send_report_every_run": false,
+    "send_report_every_run": true,
     "report_min_interval_minutes": 50,
     "gap_percentage_formula": "(target_cash - team_cash) / team_cash * 100",
     "alert_rules": [
@@ -186,8 +230,47 @@
     "recommendation_language": "English",
     "max_suggestions": 4
   },
+  "auto_adjust": {
+    "enabled": true,
+    "mode": "research_only",
+    "allow_game_updates": false,
+    "targets": {
+      "days_of_cover_min": 2,
+      "days_of_cover_max": 7,
+      "days_of_cover_target": 4,
+      "warehouse_inventory_low": 50,
+      "warehouse_inventory_high": 450,
+      "lost_demand_max": 0,
+      "shipment_to_demand_ratio_min": 0.9,
+      "wip_to_demand_ratio_max": 3
+    },
+    "max_change_per_run": {
+      "order_point": 25,
+      "quantity": 25
+    },
+    "bounds": {
+      "order_point_min": 0,
+      "order_point_max": 999999,
+      "quantity_min": 0,
+      "quantity_max": 999999
+    },
+    "policy_baseline": {
+      "factory": {
+        "shipping_method": "mail",
+        "order_point": 175,
+        "quantity": 100,
+        "priority": 0
+      },
+      "warehouse": {
+        "shipping_method": "mail",
+        "order_point": 175,
+        "quantity": 100,
+        "priority": 0
+      }
+    }
+  },
   "email": {
-    "enabled": false,
+    "enabled": true,
     "recipients": [
       "950154@gmail.com",
       "wgong009@ucr.edu",
@@ -208,6 +291,9 @@
     "warehouse_inventory_csv": ".monitor-state/warehouse_inventory_latest.csv",
     "standing_gaps_csv": ".monitor-state/standing_gaps_latest.csv",
     "operational_snapshot_csv": ".monitor-state/operational_snapshot_latest.csv",
+    "policy_snapshot_csv": ".monitor-state/policy_snapshot_latest.csv",
+    "adjustment_plan_json": ".monitor-state/adjustment_plan_latest.json",
+    "adjustment_plan_csv": ".monitor-state/adjustment_plan_latest.csv",
     "data_workbook_xlsx": ".monitor-state/supply_chain_data_latest.xlsx",
     "email_delivery_json": ".monitor-state/email_delivery_latest.json"
   },
