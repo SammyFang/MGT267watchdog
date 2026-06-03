@@ -189,7 +189,7 @@ Editable fields are in `backtest`:
 Outputs:
 
 - Email section: `Backtest Snapshot`
-- Excel tabs: `Backtest Summary`, `Backtest Thresholds`, `Backtest Daily`
+- Excel tabs: `Backtest`, `Backtest Summary`, `Backtest Thresholds`, `Backtest Daily`
 - JSON: `.monitor-state/backtest_latest.json`
 - CSV: `.monitor-state/backtest_summary_latest.csv`
 - CSV: `.monitor-state/backtest_daily_latest.csv`
@@ -233,7 +233,7 @@ Hourly reports include:
 - one `.xlsx` attachment with every scraped Data table in separate tabs, plus summary, standing, and policy tabs
 - a `Watchlist` tab and EMA / Delta vs EMA formula columns on each Data tab
 - an `Adjustment Plan` tab with research-only suggested policy changes and safety flags
-- `Backtest` tabs generated from the same trigger's crawled plot data
+- a dedicated `Backtest` tab plus detailed backtest tabs generated from the same trigger's crawled plot data
 
 The `Email Smoke Test` GitHub workflow sends one real test email with repository secrets:
 

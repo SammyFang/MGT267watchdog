@@ -1441,6 +1441,158 @@ function buildBacktestDailyCsv(report) {
   ].join("\r\n")}\r\n`;
 }
 
+function styleSectionHeader(row, fill = "FFE2E8F0", fontColor = "FF0F172A") {
+  row.font = { bold: true, color: { argb: fontColor } };
+  row.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: fill },
+  };
+  row.alignment = { vertical: "middle" };
+}
+
+function addBacktestDashboardWorksheet(workbook, usedNames, report) {
+  if (!report?.enabled) {
+    return;
+  }
+
+  const worksheet = workbook.addWorksheet(safeWorksheetName("Backtest", usedNames));
+  const latest = report.latest || {};
+
+  worksheet.views = [{ state: "frozen", ySplit: 3 }];
+  worksheet.columns = [
+    { width: 30 },
+    { width: 18 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 44 },
+  ];
+
+  worksheet.mergeCells("A1:G1");
+  const titleCell = worksheet.getCell("A1");
+  titleCell.value = "Backtest";
+  titleCell.font = { bold: true, size: 18, color: { argb: "FFFFFFFF" } };
+  titleCell.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF1D4ED8" },
+  };
+  titleCell.alignment = { vertical: "middle" };
+  worksheet.getRow(1).height = 28;
+
+  worksheet.addRow([
+    "Generated at",
+    report.generated_at_local,
+    "Data source",
+    report.data_source,
+    "Local dependency",
+    report.local_dependency,
+    "",
+  ]);
+  worksheet.addRow([
+    "Window",
+    `${report.day_start} to ${report.day_end}`,
+    "Observations",
+    report.observations,
+    "Horizon days",
+    report.horizon_days,
+    "",
+  ]);
+
+  const latestHeader = worksheet.addRow(["Latest Operational State", "", "", "", "", "", ""]);
+  worksheet.mergeCells(`A${latestHeader.number}:G${latestHeader.number}`);
+  styleSectionHeader(latestHeader, "FFDDEBFF");
+  worksheet.addRow([
+    "warehouse_inventory",
+    latest.warehouse_inventory ?? "",
+    "demand",
+    latest.demand ?? "",
+    "lost_demand",
+    latest.lost_demand ?? "",
+    "",
+  ]);
+  worksheet.addRow([
+    "shipments",
+    latest.shipments ?? "",
+    "factory_wip",
+    latest.factory_wip ?? "",
+    "cash_balance",
+    latest.cash_balance ?? "",
+    "",
+  ]);
+  worksheet.addRow([
+    "days_of_cover",
+    roundMetric(latest.days_of_cover, 4) ?? "",
+    "shipment_to_demand_ratio",
+    roundMetric(latest.shipment_to_demand_ratio, 4) ?? "",
+    "inventory_ema",
+    roundMetric(latest.inventory_ema, 4) ?? "",
+    "",
+  ]);
+
+  worksheet.addRow([]);
+  const recHeader = worksheet.addRow([
+    "Recommended indicator",
+    "Operator",
+    "Suggested threshold",
+    "Precision",
+    "Recall",
+    "F1",
+    "Basis",
+  ]);
+  styleSectionHeader(recHeader);
+
+  for (const item of report.recommendations || []) {
+    worksheet.addRow([
+      item.indicator,
+      item.operator,
+      item.suggested_threshold,
+      Number.isFinite(item.precision) ? item.precision : "",
+      Number.isFinite(item.recall) ? item.recall : "",
+      Number.isFinite(item.f1) ? item.f1 : "",
+      item.note,
+    ]);
+  }
+
+  worksheet.addRow([]);
+  const thresholdHeader = worksheet.addRow([
+    "category",
+    "candidate",
+    "operator",
+    "observations",
+    "precision",
+    "recall",
+    "f1",
+  ]);
+  styleSectionHeader(thresholdHeader);
+
+  for (const test of report.tests || []) {
+    worksheet.addRow([
+      test.category,
+      test.candidate,
+      test.operator,
+      test.observations,
+      roundMetric(test.precision, 4) ?? "",
+      roundMetric(test.recall, 4) ?? "",
+      roundMetric(test.f1, 4) ?? "",
+    ]);
+  }
+
+  worksheet.eachRow((row) => {
+    row.eachCell((cell) => {
+      cell.border = {
+        top: { style: "thin", color: { argb: "FFE2E8F0" } },
+        left: { style: "thin", color: { argb: "FFE2E8F0" } },
+        bottom: { style: "thin", color: { argb: "FFE2E8F0" } },
+        right: { style: "thin", color: { argb: "FFE2E8F0" } },
+      };
+      cell.alignment = { vertical: "middle", wrapText: true };
+    });
+  });
+}
+
 function addBacktestSummaryWorksheet(workbook, usedNames, report) {
   if (!report?.enabled) {
     return;
@@ -1602,6 +1754,7 @@ function addBacktestDailyWorksheet(workbook, usedNames, report) {
 }
 
 function addBacktestWorksheets(workbook, usedNames, report) {
+  addBacktestDashboardWorksheet(workbook, usedNames, report);
   addBacktestSummaryWorksheet(workbook, usedNames, report);
   addBacktestThresholdWorksheet(workbook, usedNames, report);
   addBacktestDailyWorksheet(workbook, usedNames, report);
