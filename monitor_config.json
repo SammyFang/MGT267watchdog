@@ -95,6 +95,25 @@
     "institution_env": "SC_INSTITUTION",
     "default_institution": "riverside267"
   },
+  "game_rules": {
+    "end_day": 1460,
+    "product_price_per_drum": 1450,
+    "customer_fulfillment_cost_per_drum": 150,
+    "holding_cost_per_drum_per_year": 100,
+    "cash_interest_rate_annual_percent": 10,
+    "order_response_hours": 24,
+    "capacity_expansion_cost_per_drum_per_day": 50000,
+    "capacity_expansion_lead_days": 90,
+    "capacity_can_be_retired": false,
+    "production_fixed_cost_per_batch": 1500,
+    "production_variable_cost_per_drum": 1000,
+    "truck_capacity_drums": 200,
+    "truck_cost": 15000,
+    "truck_lead_days": 7,
+    "mail_cost_per_drum": 150,
+    "mail_lead_days": 1,
+    "priority_level_affects_supply_chain": false
+  },
   "monitor": {
     "target_team": "group7",
     "warehouse_inventory_threshold": 450,
@@ -236,8 +255,8 @@
     "allow_game_updates": false,
     "targets": {
       "days_of_cover_min": 2,
-      "days_of_cover_max": 7,
-      "days_of_cover_target": 4,
+      "days_of_cover_max": 5,
+      "days_of_cover_target": 3,
       "warehouse_inventory_low": 50,
       "warehouse_inventory_high": 450,
       "lost_demand_max": 0,

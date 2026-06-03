@@ -7,6 +7,25 @@ const nodemailer = require("nodemailer");
 const ExcelJS = require("exceljs");
 
 const CONFIG_PATH = path.resolve(process.cwd(), "monitor_config.json");
+const DEFAULT_GAME_RULES = {
+  end_day: 1460,
+  product_price_per_drum: 1450,
+  customer_fulfillment_cost_per_drum: 150,
+  holding_cost_per_drum_per_year: 100,
+  cash_interest_rate_annual_percent: 10,
+  order_response_hours: 24,
+  capacity_expansion_cost_per_drum_per_day: 50000,
+  capacity_expansion_lead_days: 90,
+  capacity_can_be_retired: false,
+  production_fixed_cost_per_batch: 1500,
+  production_variable_cost_per_drum: 1000,
+  truck_capacity_drums: 200,
+  truck_cost: 15000,
+  truck_lead_days: 7,
+  mail_cost_per_drum: 150,
+  mail_lead_days: 1,
+  priority_level_affects_supply_chain: false,
+};
 
 function readJson(filePath, fallback = null) {
   if (!fs.existsSync(filePath)) {
@@ -2018,6 +2037,74 @@ function mergePolicyBaseline(fallbackBaseline = {}, scrapedBaseline = {}) {
   };
 }
 
+function gameRules(config) {
+  return {
+    ...DEFAULT_GAME_RULES,
+    ...(config.game_rules || {}),
+  };
+}
+
+function dashboardDayNumber(record) {
+  const value = Number(String(record.dashboardDay ?? "").replace(/,/g, ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+function remainingGameDays(config, record) {
+  const day = dashboardDayNumber(record);
+  const endDay = Number(gameRules(config).end_day);
+
+  if (!Number.isFinite(day) || !Number.isFinite(endDay)) {
+    return null;
+  }
+
+  return Math.max(0, endDay - day);
+}
+
+function policyBaseline(config, policySnapshot) {
+  return mergePolicyBaseline(
+    config.auto_adjust?.policy_baseline || {},
+    buildScrapedPolicyBaseline(policySnapshot || []),
+  );
+}
+
+function policyMethodText(policy = {}) {
+  return policy.shipping_method_text || policy.shipping_method || "n/a";
+}
+
+function policyNumberText(value) {
+  return value === undefined || value === "" ? "n/a" : String(value);
+}
+
+function policyContextLines(config, policySnapshot) {
+  const baseline = policyBaseline(config, policySnapshot);
+  const factory = baseline.factory || {};
+  const warehouse = baseline.warehouse || {};
+
+  return [
+    `Factory policy: shipping_method=${policyMethodText(factory)}, order_point=${policyNumberText(factory.order_point)}, quantity=${policyNumberText(factory.quantity)}, priority=${policyNumberText(factory.priority)}.`,
+    `Warehouse policy: shipping_method=${policyMethodText(warehouse)}, order_point=${policyNumberText(warehouse.order_point)}, quantity=${policyNumberText(warehouse.quantity)}, priority=${policyNumberText(warehouse.priority)}.`,
+  ];
+}
+
+function gameRuleContextLines(config, record) {
+  const rules = gameRules(config);
+  const remainingDays = remainingGameDays(config, record);
+  const truckBreakEven =
+    Number(rules.mail_cost_per_drum) > 0
+      ? Number(rules.truck_cost) / Number(rules.mail_cost_per_drum)
+      : null;
+
+  return [
+    `Game ends on day ${rules.end_day}; current dashboard day is ${record.dashboardDay}; remaining days are ${remainingDays === null ? "n/a" : remainingDays}. Inventory and capacity are obsolete at game end.`,
+    `Orders must ship within ${rules.order_response_hours} hours or become lost demand; future demand is otherwise stable and seasonal.`,
+    `Economics: price=${rules.product_price_per_drum}/drum, customer fulfillment cost=${rules.customer_fulfillment_cost_per_drum}/drum, holding cost=${rules.holding_cost_per_drum_per_year}/drum/year, cash earns ${rules.cash_interest_rate_annual_percent}%/year.`,
+    `Capacity expansion costs ${rules.capacity_expansion_cost_per_drum_per_day} per added drum/day, takes ${rules.capacity_expansion_lead_days} days, and cannot be retired.`,
+    `Production batch cost is ${rules.production_fixed_cost_per_batch} fixed plus ${rules.production_variable_cost_per_drum}/drum; avoid tiny batches unless flexibility is worth the fixed cost.`,
+    `Factory-to-warehouse transport: mail costs ${rules.mail_cost_per_drum}/drum and takes ${rules.mail_lead_days} day; truck costs ${rules.truck_cost} up to ${rules.truck_capacity_drums} drums and takes ${rules.truck_lead_days} days${Number.isFinite(truckBreakEven) ? `, so truck is cheaper than mail only above about ${Math.ceil(truckBreakEven)} drums` : ""}.`,
+    "Priority level does not affect this assignment; never recommend changing priority.",
+  ];
+}
+
 function metricValue(metricCatalog, key) {
   const metric = metricCatalog?.get(key);
   return Number.isFinite(metric?.valueNumber) ? metric.valueNumber : null;
@@ -2092,7 +2179,7 @@ function buildAutoAdjustmentPlan(
   const maxChange = cfg.max_change_per_run || {};
   const bounds = cfg.bounds || {};
   const scrapedBaseline = buildScrapedPolicyBaseline(policySnapshot);
-  const baseline = mergePolicyBaseline(cfg.policy_baseline || {}, scrapedBaseline);
+  const baseline = policyBaseline(config, policySnapshot);
   const recommendations = [];
 
   const demand = metricValue(metricCatalog, "hq_demand:Calopeia");
@@ -3632,44 +3719,100 @@ function standingSummaryLines(standingReport, limit = 8) {
 function buildFallbackRecommendations(config, record, standingReport, options = {}) {
   const suggestions = [];
   const snapshot = options.operationalSnapshot;
+  const metricCatalog = options.metricCatalog;
   const lostDemand = findOperationalMetric(snapshot, "hq_lost_demand:Calopeia");
   const demand = findOperationalMetric(snapshot, "hq_demand:Calopeia");
   const wip = findOperationalMetric(snapshot, "factory_wip:Calopeia");
   const shipments = findOperationalMetric(snapshot, "warehouse_shipments:Calopeia");
+  const daysOfCover = metricValue(metricCatalog, "derived:days_of_cover");
+  const shipmentRatio = metricValue(metricCatalog, "derived:shipment_to_demand_ratio");
+  const targets = config.auto_adjust?.targets || {};
+  const daysMin = Number(targets.days_of_cover_min ?? 2);
+  const daysMax = Number(targets.days_of_cover_max ?? 5);
+  const inventoryLow = Number(targets.warehouse_inventory_low ?? 50);
+  const shipmentRatioMin = Number(targets.shipment_to_demand_ratio_min ?? 0.9);
+  const rules = gameRules(config);
+  const remainingDays = remainingGameDays(config, record);
+  const policy = policyBaseline(config, options.policySnapshot || []);
+  const factory = policy.factory || {};
+  const factoryMethod = policyMethodText(factory);
+  const factoryMethodLower = factoryMethod.toLowerCase();
+  const factoryQuantity = Number(factory.quantity);
+  const truckBreakEven =
+    Number(rules.mail_cost_per_drum) > 0
+      ? Math.ceil(Number(rules.truck_cost) / Number(rules.mail_cost_per_drum))
+      : null;
+  const daysCoverText = Number.isFinite(daysOfCover)
+    ? `${formatMetricNumber(daysOfCover, "days")} days of cover`
+    : "unknown days of cover";
+  const shortageRisk =
+    (Number.isFinite(lostDemand?.valueNumber) && lostDemand.valueNumber > 0) ||
+    (Number.isFinite(daysOfCover) && daysOfCover < daysMin) ||
+    record.warehouseInventory <= inventoryLow;
+  const highStock =
+    record.inventoryAlert ||
+    (Number.isFinite(daysOfCover) && daysOfCover > daysMax);
 
-  if (record.inventoryAlert) {
+  if (shortageRisk) {
     suggestions.push(
-      `Warehouse inventory ${record.warehouseInventory} has reached the ${record.threshold} alert; reduce inbound stock or accelerate shipments if demand supports it.`,
+      `Shortage risk is active: inventory ${record.warehouseInventory}, ${daysCoverText}, lost demand ${lostDemand?.valueRaw || "n/a"}; protect 24-hour customer fulfillment before cutting stock further.`,
     );
-  } else if (record.warehouseInventory <= 0 && lostDemand?.valueNumber > 0) {
+  } else if (highStock) {
     suggestions.push(
-      `Warehouse inventory is ${record.warehouseInventory} while lost demand is ${lostDemand.valueRaw}; prioritize replenishment and outbound availability.`,
+      `Inventory is high: warehouse ${record.warehouseInventory}, ${daysCoverText}; trim order point or batch quantity gradually because holding cost applies and unsold stock is worthless on day ${rules.end_day}.`,
     );
   } else {
     suggestions.push(
-      `Warehouse inventory ${record.warehouseInventory} is below the ${record.threshold} alert; keep production and shipments aligned with demand.`,
+      `Inventory is within the decision band: warehouse ${record.warehouseInventory}, ${daysCoverText}; keep changes small and watch seasonal demand, shipments, and lost demand together.`,
     );
   }
 
   if (lostDemand?.valueNumber > 0) {
     suggestions.push(
-      `Lost demand is ${lostDemand.valueRaw}; check whether warehouse stock, shipment timing, or factory output is the binding constraint.`,
+      `Lost demand is ${lostDemand.valueRaw}; inspect warehouse availability and factory-to-warehouse lead time first, since unfilled orders are lost after 24 hours.`,
+    );
+  } else if (Number.isFinite(shipmentRatio) && shipmentRatio < shipmentRatioMin) {
+    suggestions.push(
+      `Shipments trail demand at ${formatMetricNumber(shipmentRatio, "ratio")}; verify whether warehouse stock or replenishment timing is constraining customer fulfillment.`,
     );
   }
 
-  if (wip?.valueNumber > 0 && shipments?.valueNumber === 0) {
+  if (shortageRisk && factoryMethodLower.includes("truck")) {
     suggestions.push(
-      `Factory WIP is ${wip.valueRaw} and shipments are ${shipments.valueRaw}; review the outbound flow before adding more WIP.`,
+      `Factory-to-warehouse transport is currently ${factoryMethod}; mail costs more per large batch but arrives in ${rules.mail_lead_days} day versus truck in ${rules.truck_lead_days} days, so compare it for urgent recovery.`,
+    );
+  } else if (
+    !shortageRisk &&
+    Number.isFinite(factoryQuantity) &&
+    Number.isFinite(truckBreakEven) &&
+    factoryQuantity >= truckBreakEven &&
+    factoryMethodLower.includes("mail")
+  ) {
+    suggestions.push(
+      `Factory batch quantity ${factoryQuantity} is above the truck cost break-even near ${truckBreakEven} drums; if coverage is healthy, compare truck savings against the ${rules.truck_lead_days}-day delay.`,
+    );
+  } else if (wip?.valueNumber > 0 && shipments?.valueNumber === 0) {
+    suggestions.push(
+      `Factory WIP is ${wip.valueRaw} and shipments are ${shipments.valueRaw}; review batch completion and transport timing before starting more production.`,
+    );
+  }
+
+  if (
+    Number.isFinite(remainingDays) &&
+    remainingDays <= Number(rules.capacity_expansion_lead_days) + 30
+  ) {
+    suggestions.push(
+      `Only ${remainingDays} days remain and capacity takes ${rules.capacity_expansion_lead_days} days to arrive; avoid new capacity unless the backtest shows persistent lost demand.`,
     );
   }
 
   if (standingReport.target.rank === 1) {
     suggestions.push(
-      `Cash rank is 1 at ${record.targetCash}; protect the lead by avoiding excess inventory cost and missed demand.`,
+      `Cash rank is 1 at ${record.targetCash}; protect the lead by avoiding excess inventory, underfilled truck cost, and avoidable missed demand.`,
     );
   } else {
     suggestions.push(
-      `Cash rank is ${standingReport.target.rank}; compare the cash gap table before taking high-cost recovery actions.`,
+      `Cash rank is ${standingReport.target.rank}; close the gap by eliminating lost demand first, then reduce carrying and transport waste before considering capacity.`,
     );
   }
 
@@ -3722,7 +3865,15 @@ function buildRecommendationPrompt(config, record, standingReport, options = {})
     "Use only the data below. Do not invent missing values.",
     `Write ${language}. Return 2 to 4 concise action recommendations.`,
     "Each recommendation should be one short sentence, useful for operations decisions, and avoid formulas.",
+    "Focus on practical levers: order point, order quantity, shipping method, capacity timing, cash protection, and lost-demand prevention.",
+    "Do not recommend changing priority level because it does not affect this assignment.",
     "Return JSON only in this shape: {\"recommendations\":[\"...\"]}",
+    "",
+    "Game rules:",
+    ...gameRuleContextLines(config, record),
+    "",
+    "Current policy context:",
+    ...policyContextLines(config, options.policySnapshot || []),
     "",
     `Target team: ${record.targetTeam}`,
     `Checked at: ${record.checkedAtLocal} ${config.crawl.timezone}`,

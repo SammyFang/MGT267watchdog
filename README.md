@@ -14,6 +14,7 @@ Most settings are in `monitor_config.json`:
 - `monitor.report_min_interval_minutes`: minimum time between scheduled hourly report emails, currently `50`.
 - `monitor.alert_rules`: editable watchlist rules for stockout risk, lost demand, days of cover, shipment coverage, and cash lead.
 - `monitor.metric_thresholds`: optional min/max alert thresholds for the hourly report's warehouse, factory, and headquarters metrics.
+- `game_rules`: Supply Chain Game economics used by Action Notes, including day `1460` obsolescence, 24-hour order loss, transport costs, capacity lead time, and the no-effect priority rule.
 - `ai.enabled`, `ai.model`, `ai.api_key_env`: Gemini recommendation settings.
 - `auto_adjust`: research-only adjustment planner settings. It writes suggested policy changes to email, JSON/CSV, and Excel, but never submits game forms.
 - `backtest`: per-trigger backtest settings. It uses the plot data crawled during the current GitHub Actions run and has no local file dependency.
@@ -165,6 +166,9 @@ Editable fields:
 - `auto_adjust.max_change_per_run`: maximum suggested change per crawler run for `order_point` and `quantity`.
 - `auto_adjust.bounds`: min/max allowed values used when calculating suggested values.
 - `auto_adjust.policy_baseline`: current Factory and Warehouse policy values used as the baseline for suggested changes.
+
+The current days-of-cover research band is `2` to `5` days with target `3`, matching the high-cover alert at `> 5` days and the game rule that inventory becomes worthless on day `1460`.
+`priority1` is still captured in policy tables for completeness, but it is intentionally excluded from recommendations because the assignment states priority level has no effect.
 
 Outputs:
 
