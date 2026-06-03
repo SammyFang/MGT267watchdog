@@ -46,6 +46,7 @@ jobs:
             monitor-state-
 
       - name: Check warning rules
+        continue-on-error: true
         run: npm run warning-email
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
@@ -60,6 +61,8 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
       - name: Run hourly report throttle
+        if: ${{ !cancelled() }}
+        continue-on-error: true
         run: npm run monitor
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
@@ -90,11 +93,11 @@ jobs:
           include-hidden-files: true
 
       - name: Wait for next check
-        if: success()
+        if: ${{ !cancelled() }}
         run: sleep 900
 
       - name: Dispatch next heartbeat
-        if: success()
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}

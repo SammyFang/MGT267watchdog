@@ -56,22 +56,74 @@ function cookieHeader(cookieJar) {
     .join("; ");
 }
 
-async function request(url, options, cookieJar) {
-  const headers = new Headers(options.headers || {});
-  const cookies = cookieHeader(cookieJar);
+function requestLabel(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return String(url);
+  }
+}
 
-  if (cookies) {
-    headers.set("cookie", cookies);
+function retryDelayMs(attempt) {
+  return Math.min(1500 * 2 ** (attempt - 1), 10000);
+}
+
+function isRetryableStatus(status) {
+  return [408, 429, 500, 502, 503, 504].includes(status);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function request(url, options, cookieJar) {
+  const maxAttempts = Math.max(
+    1,
+    Number.parseInt(optionalEnv("SC_FETCH_ATTEMPTS", "4"), 10) || 4,
+  );
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const headers = new Headers(options.headers || {});
+    const cookies = cookieHeader(cookieJar);
+
+    if (cookies) {
+      headers.set("cookie", cookies);
+    }
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers,
+        redirect: "manual",
+      });
+
+      collectCookies(response.headers, cookieJar);
+
+      if (!isRetryableStatus(response.status) || attempt === maxAttempts) {
+        return response;
+      }
+
+      console.warn(
+        `Retrying ${requestLabel(url)} after HTTP ${response.status} (${attempt}/${maxAttempts})`,
+      );
+    } catch (error) {
+      lastError = error;
+
+      if (attempt === maxAttempts) {
+        throw error;
+      }
+
+      console.warn(
+        `Retrying ${requestLabel(url)} after fetch error: ${error.message} (${attempt}/${maxAttempts})`,
+      );
+    }
+
+    await delay(retryDelayMs(attempt));
   }
 
-  const response = await fetch(url, {
-    ...options,
-    headers,
-    redirect: "manual",
-  });
-
-  collectCookies(response.headers, cookieJar);
-  return response;
+  throw lastError || new Error(`Request failed: ${requestLabel(url)}`);
 }
 
 async function follow(response, cookieJar, limit = 5) {
