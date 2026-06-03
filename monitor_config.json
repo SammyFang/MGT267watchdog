@@ -124,13 +124,13 @@
     "alert_rules": [
       {
         "id": "warehouse_inventory_high",
-        "label": "Warehouse inventory high",
+        "label": "Warehouse inventory checkpoint",
         "metric": "warehouse_inventory:warehouse",
         "operator": ">=",
         "threshold": 450,
-        "severity": "critical",
+        "severity": "warning",
         "channels": ["warning", "hourly"],
-        "message": "Warehouse inventory is above the high-stock threshold."
+        "message": "Warehouse inventory reached the review checkpoint; evaluate against served-region demand before reducing stock."
       },
       {
         "id": "warehouse_stockout_risk",
@@ -144,13 +144,13 @@
       },
       {
         "id": "lost_demand_detected",
-        "label": "Lost demand detected",
-        "metric": "hq_lost_demand:Calopeia",
+        "label": "Served lost demand detected",
+        "metric": "derived:calopeia_served_lost_demand",
         "operator": ">",
         "threshold": 0,
         "severity": "critical",
         "channels": ["hourly"],
-        "message": "Lost demand is present; inspect supply and shipment timing."
+        "message": "Lost demand is present across regions served by Calopeia; inspect supply and shipment timing."
       },
       {
         "id": "lost_demand_rate_high",

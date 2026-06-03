@@ -937,12 +937,54 @@ function carriedForwardAccessor(points) {
   };
 }
 
-function buildBacktestDailyRows(config, plotSnapshots) {
+function aggregateCarriedForwardAccessor(pointGroups) {
+  const accessors = pointGroups.map((points) => carriedForwardAccessor(points));
+
+  return (day) => {
+    let total = 0;
+    let found = false;
+    let dayRaw = "";
+
+    for (const accessor of accessors) {
+      const point = accessor(day);
+
+      if (point && Number.isFinite(point.value)) {
+        total += point.value;
+        found = true;
+        dayRaw ||= point.dayRaw;
+      }
+    }
+
+    if (!found) {
+      return null;
+    }
+
+    return {
+      day,
+      dayRaw: dayRaw || String(day),
+      value: total,
+      valueRaw: formatMetricNumber(total),
+    };
+  };
+}
+
+function buildBacktestDailyRows(config, plotSnapshots, policySnapshot = []) {
+  const servedRegions = servedRegionsForWarehouse(policySnapshot, "warehouse_calopeia");
+  const demandRegions = servedRegions.length ? servedRegions : ["Calopeia"];
+  const demandGroups = demandRegions.map((region) =>
+    seriesPoints(plotSnapshots, "hq_demand", region),
+  );
+  const lostDemandGroups = demandRegions.map((region) =>
+    seriesPoints(plotSnapshots, "hq_lost_demand", region),
+  );
+  const shipmentGroups = demandRegions.map((region) =>
+    seriesPoints(plotSnapshots, "warehouse_shipments", region),
+  );
   const sources = {
     inventory: seriesPoints(plotSnapshots, "warehouse_inventory", "warehouse"),
-    demand: seriesPoints(plotSnapshots, "hq_demand", "Calopeia"),
-    lostDemand: seriesPoints(plotSnapshots, "hq_lost_demand", "Calopeia"),
-    shipments: seriesPoints(plotSnapshots, "warehouse_shipments", "Calopeia"),
+    demand: demandGroups.flat(),
+    lostDemand: lostDemandGroups.flat(),
+    shipments: shipmentGroups.flat(),
     wip: seriesPoints(plotSnapshots, "factory_wip", "Calopeia"),
     cashBalance: seriesPoints(plotSnapshots, "hq_cash_balance", "value"),
   };
@@ -950,10 +992,19 @@ function buildBacktestDailyRows(config, plotSnapshots) {
     Object.values(sources).flatMap((points) => points.map((point) => point.day)),
   );
   const accessors = Object.fromEntries(
-    Object.entries(sources).map(([name, points]) => [
-      name,
-      carriedForwardAccessor(points),
-    ]),
+    Object.entries(sources).map(([name, points]) => {
+      if (["demand", "lostDemand", "shipments"].includes(name)) {
+        const groups =
+          name === "demand"
+            ? demandGroups
+            : name === "lostDemand"
+              ? lostDemandGroups
+              : shipmentGroups;
+        return [name, aggregateCarriedForwardAccessor(groups)];
+      }
+
+      return [name, carriedForwardAccessor(points)];
+    }),
   );
   const alpha = Number(config.excel?.exponential_smoothing_alpha ?? 0.3);
   const smoothingAlpha = Number.isFinite(alpha) ? alpha : 0.3;
@@ -1230,7 +1281,13 @@ function bestBacktestCandidate(tests, category, preferredCandidate = null) {
   return candidates[0] || null;
 }
 
-function buildBacktestReport(config, record, standingReport, plotSnapshots) {
+function buildBacktestReport(
+  config,
+  record,
+  standingReport,
+  plotSnapshots,
+  policySnapshot = [],
+) {
   const enabled = config.backtest?.enabled !== false;
 
   if (!enabled) {
@@ -1242,7 +1299,7 @@ function buildBacktestReport(config, record, standingReport, plotSnapshots) {
     };
   }
 
-  const rows = buildBacktestDailyRows(config, plotSnapshots);
+  const rows = buildBacktestDailyRows(config, plotSnapshots, policySnapshot);
   const targets = config.auto_adjust?.targets || {};
   const horizonDays = Number(config.backtest?.horizon_days ?? 3);
   const excessCoverDays = Number(
@@ -2067,6 +2124,46 @@ function policyBaseline(config, policySnapshot) {
   );
 }
 
+function servedRegionsForWarehouse(policySnapshot, pageId = "warehouse_calopeia") {
+  const page = findPolicyPage(policySnapshot, pageId);
+  const outboundTable = (page?.tables || []).find((table) =>
+    /outbound shipments to customers/i.test(table.label || ""),
+  );
+  const regions = [];
+
+  for (const row of (outboundTable?.rows || []).slice(1)) {
+    const destination = compactText(row[0] || "");
+    const served = compactText(row[2] || "").toLowerCase();
+
+    if (destination && served.startsWith("yes")) {
+      regions.push(destination);
+    }
+  }
+
+  return [...new Set(regions)];
+}
+
+function metricMapValue(metricMap, key) {
+  const metric = metricMap.get(key);
+  return Number.isFinite(metric?.valueNumber) ? metric.valueNumber : null;
+}
+
+function sumMetricForRegions(metricMap, prefix, regions) {
+  let total = 0;
+  let found = false;
+
+  for (const region of regions) {
+    const value = metricMapValue(metricMap, `${prefix}:${region}`);
+
+    if (Number.isFinite(value)) {
+      total += value;
+      found = true;
+    }
+  }
+
+  return found ? total : null;
+}
+
 function policyMethodText(policy = {}) {
   return policy.shipping_method_text || policy.shipping_method || "n/a";
 }
@@ -2102,6 +2199,38 @@ function gameRuleContextLines(config, record) {
     `Production batch cost is ${rules.production_fixed_cost_per_batch} fixed plus ${rules.production_variable_cost_per_drum}/drum; avoid tiny batches unless flexibility is worth the fixed cost.`,
     `Factory-to-warehouse transport: mail costs ${rules.mail_cost_per_drum}/drum and takes ${rules.mail_lead_days} day; truck costs ${rules.truck_cost} up to ${rules.truck_capacity_drums} drums and takes ${rules.truck_lead_days} days${Number.isFinite(truckBreakEven) ? `, so truck is cheaper than mail only above about ${Math.ceil(truckBreakEven)} drums` : ""}.`,
     "Priority level does not affect this assignment; never recommend changing priority.",
+  ];
+}
+
+function serviceContextLines(config, record, metricCatalog, policySnapshot) {
+  const regions = servedRegionsForWarehouse(policySnapshot || [], "warehouse_calopeia");
+  const servedRegions = regions.length ? regions : ["Calopeia"];
+  const targets = config.auto_adjust?.targets || {};
+  const daysMax = Number(targets.days_of_cover_max ?? 5);
+  const daysMin = Number(targets.days_of_cover_min ?? 2);
+  const demand =
+    metricRaw(metricCatalog, "derived:calopeia_served_demand") ||
+    metricRaw(metricCatalog, "hq_demand:Calopeia") ||
+    "n/a";
+  const lostDemand =
+    metricRaw(metricCatalog, "derived:calopeia_served_lost_demand") ||
+    metricRaw(metricCatalog, "hq_lost_demand:Calopeia") ||
+    "n/a";
+  const shipments =
+    metricRaw(metricCatalog, "derived:calopeia_served_shipments") ||
+    metricRaw(metricCatalog, "warehouse_shipments:Calopeia") ||
+    "n/a";
+  const daysCover = metricValue(metricCatalog, "derived:days_of_cover");
+  const daysCoverText = Number.isFinite(daysCover)
+    ? formatMetricNumber(daysCover, "days")
+    : "n/a";
+
+  return [
+    `Calopeia warehouse currently serves ${servedRegions.length} region(s): ${servedRegions.join(", ")}.`,
+    `Use served-region demand for Calopeia buffer decisions: served demand=${demand}, served shipments=${shipments}, served lost demand=${lostDemand}, served days of cover=${daysCoverText}.`,
+    `The 450 inventory threshold is a review checkpoint, not proof of excess when Calopeia serves multiple regions.`,
+    `If served days of cover is between ${daysMin} and ${daysMax} and lost demand is zero, recommend holding or restoring policy settings rather than reducing inventory just to clear an alert.`,
+    "Avoid bullwhip over-correction: do not swing order point or quantity based on one checkpoint; prefer small staged changes and wait for truck pipeline unless lost demand appears.",
   ];
 }
 
@@ -2182,9 +2311,15 @@ function buildAutoAdjustmentPlan(
   const baseline = policyBaseline(config, policySnapshot);
   const recommendations = [];
 
-  const demand = metricValue(metricCatalog, "hq_demand:Calopeia");
-  const shipments = metricValue(metricCatalog, "warehouse_shipments:Calopeia");
-  const lostDemand = metricValue(metricCatalog, "hq_lost_demand:Calopeia");
+  const demand =
+    metricValue(metricCatalog, "derived:calopeia_served_demand") ??
+    metricValue(metricCatalog, "hq_demand:Calopeia");
+  const shipments =
+    metricValue(metricCatalog, "derived:calopeia_served_shipments") ??
+    metricValue(metricCatalog, "warehouse_shipments:Calopeia");
+  const lostDemand =
+    metricValue(metricCatalog, "derived:calopeia_served_lost_demand") ??
+    metricValue(metricCatalog, "hq_lost_demand:Calopeia");
   const wip = metricValue(metricCatalog, "factory_wip:Calopeia");
   const daysOfCover = metricValue(metricCatalog, "derived:days_of_cover");
   const shipmentRatio = metricValue(
@@ -2196,9 +2331,14 @@ function buildAutoAdjustmentPlan(
     metricCatalog,
     "derived:cash_lead_percent_vs_nearest",
   );
+  const servedRegionCount =
+    metricValue(metricCatalog, "derived:calopeia_served_region_count") ?? 1;
+  const truckPipeline = metricValue(metricCatalog, "warehouse_inventory:truck");
+  const mailPipeline = metricValue(metricCatalog, "warehouse_inventory:mail");
+  const rules = gameRules(config);
 
   const daysMin = Number(targets.days_of_cover_min ?? 2);
-  const daysMax = Number(targets.days_of_cover_max ?? 7);
+  const daysMax = Number(targets.days_of_cover_max ?? 5);
   const daysTarget = Number(
     targets.days_of_cover_target ?? (daysMin + daysMax) / 2,
   );
@@ -2223,7 +2363,7 @@ function buildAutoAdjustmentPlan(
       : null;
   const excessCoverage =
     (Number.isFinite(daysOfCover) && daysOfCover > daysMax) ||
-    record.warehouseInventory >= inventoryHigh;
+    (servedRegionCount <= 1 && record.warehouseInventory >= inventoryHigh);
   const shortageRisk =
     (Number.isFinite(lostDemand) && lostDemand > lostDemandMax) ||
     (Number.isFinite(daysOfCover) && daysOfCover < daysMin) ||
@@ -2234,6 +2374,10 @@ function buildAutoAdjustmentPlan(
     Number.isFinite(wip) && Number.isFinite(demand) && demand > 0
       ? wip / demand
       : null;
+  const activePipeline =
+    (Number.isFinite(wip) && wip > 0) ||
+    (Number.isFinite(truckPipeline) && truckPipeline > 0) ||
+    (Number.isFinite(mailPipeline) && mailPipeline > 0);
 
   function addRecommendation({
     area,
@@ -2281,6 +2425,24 @@ function buildAutoAdjustmentPlan(
     });
   }
 
+  function shortageDirection(current, parameter) {
+    const numericCurrent = Number(current);
+
+    if (!Number.isFinite(numericCurrent) || targetInventory === null) {
+      return "increase";
+    }
+
+    if (parameter === "quantity" && numericCurrent >= targetInventory) {
+      return "hold";
+    }
+
+    if (parameter === "order_point" && numericCurrent >= targetInventory) {
+      return "hold";
+    }
+
+    return "increase";
+  }
+
   if (!enabled) {
     return {
       enabled: false,
@@ -2303,9 +2465,11 @@ function buildAutoAdjustmentPlan(
   const inventoryReason = [
     `inventory ${record.warehouseInventory}`,
     Number.isFinite(daysOfCover) ? `days of cover ${formatMetricNumber(daysOfCover, "days")}` : "",
-    Number.isFinite(demand) ? `demand ${metricRaw(metricCatalog, "hq_demand:Calopeia")}` : "",
+    Number.isFinite(demand)
+      ? `served demand ${metricRaw(metricCatalog, "derived:calopeia_served_demand") || metricRaw(metricCatalog, "hq_demand:Calopeia")}`
+      : "",
     Number.isFinite(lostDemand)
-      ? `lost demand ${metricRaw(metricCatalog, "hq_lost_demand:Calopeia")}`
+      ? `served lost demand ${metricRaw(metricCatalog, "derived:calopeia_served_lost_demand") || metricRaw(metricCatalog, "hq_lost_demand:Calopeia")}`
       : "",
     targetInventory !== null ? `target inventory near ${targetInventory}` : "",
   ]
@@ -2313,38 +2477,80 @@ function buildAutoAdjustmentPlan(
     .join("; ");
 
   if (posture === "shortage_risk") {
+    const factoryOrderPointDirection = shortageDirection(
+      factory.order_point,
+      "order_point",
+    );
+    const factoryQuantityDirection = shortageDirection(factory.quantity, "quantity");
+    const warehouseOrderPointDirection = shortageDirection(
+      warehouse.order_point,
+      "order_point",
+    );
+    const warehouseQuantityDirection = shortageDirection(
+      warehouse.quantity,
+      "quantity",
+    );
+    const pipelineText = activePipeline
+      ? `active pipeline detected: WIP ${formatMetricNumber(wip || 0)}, truck ${formatMetricNumber(truckPipeline || 0)}, mail ${formatMetricNumber(mailPipeline || 0)}`
+      : "no active pipeline detected";
+
     addNumericPolicy(
       "factory",
       "order_point",
       factory.order_point,
-      "increase",
+      factoryOrderPointDirection,
       orderPointStep,
-      `Shortage risk detected; ${inventoryReason}.`,
+      factoryOrderPointDirection === "hold"
+        ? `Shortage risk is timing-driven, but factory order point already exceeds served-demand target; ${inventoryReason}; ${pipelineText}.`
+        : `Shortage risk detected and factory order point is below served-demand target; ${inventoryReason}.`,
     );
     addNumericPolicy(
       "factory",
       "quantity",
       factory.quantity,
-      "increase",
+      factoryQuantityDirection,
       quantityStep,
-      `Raise replenishment cautiously until coverage returns to ${daysMin}-${daysMax} days.`,
+      factoryQuantityDirection === "hold"
+        ? `Current batch quantity is already large relative to served demand; avoid bullwhip and wait for pipeline unless lost demand persists.`
+        : `Raise replenishment cautiously until coverage returns to ${daysMin}-${daysMax} days.`,
     );
     addNumericPolicy(
       "warehouse",
       "order_point",
       warehouse.order_point,
-      "increase",
+      warehouseOrderPointDirection,
       orderPointStep,
-      `Warehouse coverage is below target or lost demand is present; ${inventoryReason}.`,
+      warehouseOrderPointDirection === "hold"
+        ? `Warehouse order point already exceeds served-demand target; shortage risk points to timing or inbound pipeline, not a lower trigger point.`
+        : `Warehouse coverage is below target or lost demand is present; ${inventoryReason}.`,
     );
     addNumericPolicy(
       "warehouse",
       "quantity",
       warehouse.quantity,
-      "increase",
+      warehouseQuantityDirection,
       quantityStep,
-      "Increase outbound replenishment planning only after confirming inventory is available.",
+      warehouseQuantityDirection === "hold"
+        ? `Keep warehouse quantity steady to avoid over-correction while inbound inventory catches up.`
+        : "Increase outbound replenishment planning only after confirming inventory is available.",
     );
+
+    if (
+      String(factory.shipping_method_text || factory.shipping_method || "")
+        .toLowerCase()
+        .includes("truck")
+    ) {
+      addRecommendation({
+        area: "factory",
+        parameter: "shipping_method",
+        baselineValue: policyMethodText(factory),
+        suggestedValue: "emergency mail review only",
+        direction: "review",
+        urgency: Number.isFinite(lostDemand) && lostDemand > 0 ? "high" : "medium",
+        confidence: "medium",
+        reason: `Truck takes ${rules.truck_lead_days} days; consider temporary mail only for urgent recovery if inventory is below ${inventoryLow} and served lost demand persists.`,
+      });
+    }
   } else if (posture === "excess_stock") {
     addNumericPolicy(
       "factory",
@@ -2416,7 +2622,12 @@ function buildAutoAdjustmentPlan(
     );
   }
 
-  if (Number.isFinite(wipRatio) && wipRatio > wipRatioMax && !shortageRisk) {
+  if (
+    Number.isFinite(wipRatio) &&
+    wipRatio > wipRatioMax &&
+    excessCoverage &&
+    !shortageRisk
+  ) {
     addNumericPolicy(
       "factory",
       "quantity",
@@ -2878,7 +3089,9 @@ async function buildDataWorkbookBuffer(
     options.operationalSnapshot || buildOperationalSnapshot(plotSnapshots, {});
   const metricCatalog =
     options.metricCatalog ||
-    buildMetricCatalog(config, record, standingReport, operationalSnapshot);
+    buildMetricCatalog(config, record, standingReport, operationalSnapshot, {
+      policySnapshot: options.policySnapshot || [],
+    });
   const watchlist =
     options.watchlist || buildWatchlist(config, metricCatalog, "hourly");
   const adjustmentPlan =
@@ -2892,7 +3105,13 @@ async function buildDataWorkbookBuffer(
     );
   const backtestReport =
     options.backtestReport ||
-    buildBacktestReport(config, record, standingReport, plotSnapshots);
+    buildBacktestReport(
+      config,
+      record,
+      standingReport,
+      plotSnapshots,
+      options.policySnapshot || [],
+    );
 
   addSummaryWorksheet(workbook, usedNames, config, record);
   addWatchlistWorksheet(workbook, usedNames, watchlist);
@@ -3404,7 +3623,7 @@ function nearestCompetitor(standingReport) {
     .sort((a, b) => b.cashNumber - a.cashNumber)[0];
 }
 
-function buildMetricCatalog(config, record, standingReport, snapshot) {
+function buildMetricCatalog(config, record, standingReport, snapshot, options = {}) {
   const metricMap = new Map();
 
   addMetric(metricMap, {
@@ -3453,11 +3672,59 @@ function buildMetricCatalog(config, record, standingReport, snapshot) {
     }
   }
 
-  const demand = metricMap.get("hq_demand:Calopeia")?.valueNumber;
-  const lostDemand = metricMap.get("hq_lost_demand:Calopeia")?.valueNumber;
-  const shipments = metricMap.get("warehouse_shipments:Calopeia")?.valueNumber;
+  const servedRegions = servedRegionsForWarehouse(
+    options.policySnapshot || [],
+    "warehouse_calopeia",
+  );
+  const demandRegions = servedRegions.length ? servedRegions : ["Calopeia"];
+  const demand = sumMetricForRegions(metricMap, "hq_demand", demandRegions);
+  const lostDemand = sumMetricForRegions(metricMap, "hq_lost_demand", demandRegions);
+  const shipments = sumMetricForRegions(
+    metricMap,
+    "warehouse_shipments",
+    demandRegions,
+  );
   const wip = metricMap.get("factory_wip:Calopeia")?.valueNumber;
   const competitor = nearestCompetitor(standingReport);
+
+  addMetric(metricMap, {
+    key: "derived:calopeia_served_region_count",
+    label: "Calopeia served region count",
+    valueNumber: demandRegions.length,
+    valueRaw: String(demandRegions.length),
+    unit: "regions",
+    source: "warehouse policy",
+  });
+
+  if (Number.isFinite(demand)) {
+    addMetric(metricMap, {
+      key: "derived:calopeia_served_demand",
+      label: "Calopeia served demand",
+      valueNumber: demand,
+      unit: "units",
+      source: `served regions: ${demandRegions.join(", ")}`,
+    });
+  }
+
+  if (Number.isFinite(lostDemand)) {
+    addMetric(metricMap, {
+      key: "derived:calopeia_served_lost_demand",
+      label: "Calopeia served lost demand",
+      valueNumber: lostDemand,
+      unit: "units",
+      source: `served regions: ${demandRegions.join(", ")}`,
+    });
+  }
+
+  if (Number.isFinite(shipments)) {
+    addMetric(metricMap, {
+      key: "derived:calopeia_served_shipments",
+      label: "Calopeia served shipments",
+      valueNumber: shipments,
+      unit: "units",
+      source: `served regions: ${demandRegions.join(", ")}`,
+    });
+  }
 
   if (Number.isFinite(demand) && demand > 0) {
     addMetric(metricMap, {
@@ -3465,7 +3732,7 @@ function buildMetricCatalog(config, record, standingReport, snapshot) {
       label: "Days of cover",
       valueNumber: record.warehouseInventory / demand,
       unit: "days",
-      source: "derived",
+      source: `derived from served demand: ${demandRegions.join(", ")}`,
     });
   }
 
@@ -3720,10 +3987,20 @@ function buildFallbackRecommendations(config, record, standingReport, options = 
   const suggestions = [];
   const snapshot = options.operationalSnapshot;
   const metricCatalog = options.metricCatalog;
-  const lostDemand = findOperationalMetric(snapshot, "hq_lost_demand:Calopeia");
-  const demand = findOperationalMetric(snapshot, "hq_demand:Calopeia");
   const wip = findOperationalMetric(snapshot, "factory_wip:Calopeia");
   const shipments = findOperationalMetric(snapshot, "warehouse_shipments:Calopeia");
+  const servedRegions = servedRegionsForWarehouse(
+    options.policySnapshot || [],
+    "warehouse_calopeia",
+  );
+  const serviceRegions = servedRegions.length ? servedRegions : ["Calopeia"];
+  const lostDemand =
+    metricValue(metricCatalog, "derived:calopeia_served_lost_demand") ??
+    metricValue(metricCatalog, "hq_lost_demand:Calopeia");
+  const lostDemandRaw =
+    metricRaw(metricCatalog, "derived:calopeia_served_lost_demand") ||
+    metricRaw(metricCatalog, "hq_lost_demand:Calopeia") ||
+    "n/a";
   const daysOfCover = metricValue(metricCatalog, "derived:days_of_cover");
   const shipmentRatio = metricValue(metricCatalog, "derived:shipment_to_demand_ratio");
   const targets = config.auto_adjust?.targets || {};
@@ -3746,20 +4023,30 @@ function buildFallbackRecommendations(config, record, standingReport, options = 
     ? `${formatMetricNumber(daysOfCover, "days")} days of cover`
     : "unknown days of cover";
   const shortageRisk =
-    (Number.isFinite(lostDemand?.valueNumber) && lostDemand.valueNumber > 0) ||
+    (Number.isFinite(lostDemand) && lostDemand > 0) ||
     (Number.isFinite(daysOfCover) && daysOfCover < daysMin) ||
     record.warehouseInventory <= inventoryLow;
   const highStock =
-    record.inventoryAlert ||
+    (serviceRegions.length <= 1 && record.inventoryAlert) ||
     (Number.isFinite(daysOfCover) && daysOfCover > daysMax);
+  const checkpointOnly =
+    record.inventoryAlert &&
+    serviceRegions.length > 1 &&
+    Number.isFinite(daysOfCover) &&
+    daysOfCover <= daysMax &&
+    !shortageRisk;
 
   if (shortageRisk) {
     suggestions.push(
-      `Shortage risk is active: inventory ${record.warehouseInventory}, ${daysCoverText}, lost demand ${lostDemand?.valueRaw || "n/a"}; protect 24-hour customer fulfillment before cutting stock further.`,
+      `Shortage risk is active: inventory ${record.warehouseInventory}, ${daysCoverText}, served lost demand ${lostDemandRaw}; protect 24-hour customer fulfillment before cutting stock further.`,
     );
   } else if (highStock) {
     suggestions.push(
       `Inventory is high: warehouse ${record.warehouseInventory}, ${daysCoverText}; trim order point or batch quantity gradually because holding cost applies and unsold stock is worthless on day ${rules.end_day}.`,
+    );
+  } else if (checkpointOnly) {
+    suggestions.push(
+      `Do not reduce Calopeia just to clear the 450 checkpoint: it serves ${serviceRegions.join(", ")} and has ${daysCoverText}; hold or restore the current order point unless served lost demand appears.`,
     );
   } else {
     suggestions.push(
@@ -3767,9 +4054,9 @@ function buildFallbackRecommendations(config, record, standingReport, options = 
     );
   }
 
-  if (lostDemand?.valueNumber > 0) {
+  if (Number.isFinite(lostDemand) && lostDemand > 0) {
     suggestions.push(
-      `Lost demand is ${lostDemand.valueRaw}; inspect warehouse availability and factory-to-warehouse lead time first, since unfilled orders are lost after 24 hours.`,
+      `Served lost demand is ${lostDemandRaw}; inspect warehouse availability and factory-to-warehouse lead time first, since unfilled orders are lost after 24 hours.`,
     );
   } else if (Number.isFinite(shipmentRatio) && shipmentRatio < shipmentRatioMin) {
     suggestions.push(
@@ -3846,6 +4133,121 @@ function extractRecommendationItems(text, limit) {
     .slice(0, limit);
 }
 
+function recommendationGuardrailContext(config, record, options = {}) {
+  const metricCatalog = options.metricCatalog;
+  const regions = servedRegionsForWarehouse(
+    options.policySnapshot || [],
+    "warehouse_calopeia",
+  );
+  const serviceRegions = regions.length ? regions : ["Calopeia"];
+  const targets = config.auto_adjust?.targets || {};
+  const daysMin = Number(targets.days_of_cover_min ?? 2);
+  const daysMax = Number(targets.days_of_cover_max ?? 5);
+  const inventoryLow = Number(targets.warehouse_inventory_low ?? 50);
+  const daysOfCover = metricValue(metricCatalog, "derived:days_of_cover");
+  const lostDemand =
+    metricValue(metricCatalog, "derived:calopeia_served_lost_demand") ??
+    metricValue(metricCatalog, "hq_lost_demand:Calopeia");
+  const shortageRisk =
+    (Number.isFinite(lostDemand) && lostDemand > 0) ||
+    (Number.isFinite(daysOfCover) && daysOfCover < daysMin) ||
+    record.warehouseInventory <= inventoryLow;
+  const trueHighCover = Number.isFinite(daysOfCover) && daysOfCover > daysMax;
+  const checkpointOnly =
+    record.inventoryAlert &&
+    serviceRegions.length > 1 &&
+    Number.isFinite(daysOfCover) &&
+    daysOfCover <= daysMax &&
+    !shortageRisk;
+
+  return {
+    serviceRegions,
+    shortageRisk,
+    trueHighCover,
+    checkpointOnly,
+  };
+}
+
+function violatesRecommendationGuardrails(item, context) {
+  const text = String(item || "").toLowerCase();
+
+  if (/\bpriority\b/.test(text)) {
+    return true;
+  }
+
+  if (/nearest/.test(text) && /fulfill|policy|switch|change/.test(text)) {
+    return true;
+  }
+
+  if (/cancel|uncheck|stop serving|serve fewer|disable/.test(text)) {
+    return true;
+  }
+
+  if (/clear (?:the )?(?:critical )?alert|critical alert/.test(text)) {
+    return true;
+  }
+
+  const reductionVerb = /reduce|decrease|lower|cut|trim|draw down|scale back/.test(text);
+  const inventoryTarget =
+    /inventory|stock|warehouse|order point|quantity|production|batch/.test(text);
+
+  if (context.checkpointOnly && reductionVerb && inventoryTarget) {
+    return true;
+  }
+
+  if (
+    context.checkpointOnly &&
+    /excess stock|excess inventory|future accumulation|prevent.*accumulation/.test(text)
+  ) {
+    return true;
+  }
+
+  if (!context.shortageRisk && /switch|change|use/.test(text) && /\bmail\b/.test(text)) {
+    return true;
+  }
+
+  return false;
+}
+
+function applyRecommendationGuardrails(config, record, items, fallback, options = {}) {
+  const context = recommendationGuardrailContext(config, record, options);
+  const limit = Number(config.ai?.max_suggestions || 4);
+  const accepted = [];
+  const rejected = [];
+  const seen = new Set();
+
+  function add(item) {
+    const normalized = String(item || "").trim();
+    const key = normalized.toLowerCase();
+
+    if (!normalized || seen.has(key) || accepted.length >= limit) {
+      return;
+    }
+
+    accepted.push(normalized);
+    seen.add(key);
+  }
+
+  for (const item of items || []) {
+    if (violatesRecommendationGuardrails(item, context)) {
+      rejected.push(item);
+    } else {
+      add(item);
+    }
+  }
+
+  if (rejected.length || accepted.length === 0) {
+    for (const item of fallback || []) {
+      add(item);
+    }
+  }
+
+  return {
+    items: accepted.slice(0, limit),
+    rejected,
+  };
+}
+
 function geminiApiKey(config) {
   const configuredEnv = config.ai?.api_key_env || "GEMINI_API_KEY";
 
@@ -3867,10 +4269,20 @@ function buildRecommendationPrompt(config, record, standingReport, options = {})
     "Each recommendation should be one short sentence, useful for operations decisions, and avoid formulas.",
     "Focus on practical levers: order point, order quantity, shipping method, capacity timing, cash protection, and lost-demand prevention.",
     "Do not recommend changing priority level because it does not affect this assignment.",
+    "Do not recommend reducing inventory, order point, quantity, or production solely because the 450 warehouse checkpoint is active.",
+    "If Calopeia is serving multiple regions with zero lost demand and normal served days of cover, recommend hold/restore settings and watch the truck pipeline instead of cutting.",
     "Return JSON only in this shape: {\"recommendations\":[\"...\"]}",
     "",
     "Game rules:",
     ...gameRuleContextLines(config, record),
+    "",
+    "Service and anti-bullwhip context:",
+    ...serviceContextLines(
+      config,
+      record,
+      options.metricCatalog,
+      options.policySnapshot || [],
+    ),
     "",
     "Current policy context:",
     ...policyContextLines(config, options.policySnapshot || []),
@@ -3950,14 +4362,30 @@ async function buildRecommendations(config, record, standingReport, options = {}
     const responseText =
       typeof response.text === "function" ? response.text() : response.text;
     const items = extractRecommendationItems(responseText, limit);
+    const guarded = applyRecommendationGuardrails(
+      config,
+      record,
+      items,
+      fallback,
+      options,
+    );
 
-    if (items.length === 0) {
+    if (guarded.items.length === 0) {
       throw new Error("Gemini returned no recommendation items");
     }
 
+    if (guarded.rejected.length > 0) {
+      console.warn(
+        `Gemini recommendations filtered by guardrails: ${guarded.rejected.length}`,
+      );
+    }
+
     return {
-      source: `Gemini ${model}`,
-      items,
+      source:
+        guarded.rejected.length > 0
+          ? `Gemini ${model} + local guardrails`
+          : `Gemini ${model}`,
+      items: guarded.items,
     };
   } catch (error) {
     console.warn(`Gemini recommendations failed: ${error.message}`);
@@ -4478,7 +4906,9 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
   const channel = options.kind === "warning" ? "warning" : "hourly";
   const metricCatalog =
     options.metricCatalog ??
-    buildMetricCatalog(config, record, standingReport, options.operationalSnapshot);
+    buildMetricCatalog(config, record, standingReport, options.operationalSnapshot, {
+      policySnapshot: options.policySnapshot || [],
+    });
   const watchlist = options.watchlist ?? buildWatchlist(config, metricCatalog, channel);
   const metricAlerts =
     options.metricAlerts ?? watchlist.filter((item) => item.isAlert);
@@ -4815,6 +5245,7 @@ async function runOnce(config) {
     record,
     standingReport,
     operationalSnapshot,
+    { policySnapshot },
   );
   const watchlist = buildWatchlist(config, metricCatalog, "hourly");
   const adjustmentPlan = buildAutoAdjustmentPlan(
@@ -4829,6 +5260,7 @@ async function runOnce(config) {
     record,
     standingReport,
     plotSnapshots,
+    policySnapshot,
   );
   const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
   let emailSent = false;
@@ -4993,6 +5425,7 @@ async function sendTestEmails(config) {
     baseRecord,
     standingReport,
     plotSnapshots,
+    policySnapshot,
   );
   const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
 
@@ -5026,6 +5459,7 @@ async function sendWarningEmail(config) {
     record,
     standingReport,
     operationalSnapshot,
+    { policySnapshot },
   );
   const watchlist = buildWatchlist(config, metricCatalog, "warning");
   const warningAlerts = watchlist.filter((item) => item.isAlert);
@@ -5034,6 +5468,7 @@ async function sendWarningEmail(config) {
     record,
     standingReport,
     plotSnapshots,
+    policySnapshot,
   );
   const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
   let emailSent = false;
@@ -5075,7 +5510,7 @@ async function sendWarningEmail(config) {
 
 async function runBacktestOnly(config) {
   ensureDir(path.resolve(process.cwd(), config.output.state_dir));
-  const { dashboard, inventoryTable, plotSnapshots, standingReport } =
+  const { dashboard, inventoryTable, plotSnapshots, standingReport, policySnapshot } =
     await crawl(config);
   const checkedAt = new Date().toISOString();
   const record = createRecord(config, dashboard, inventoryTable, standingReport, {
@@ -5086,6 +5521,7 @@ async function runBacktestOnly(config) {
     record,
     standingReport,
     plotSnapshots,
+    policySnapshot,
   );
   const outputs = await writeBacktestOutputs(config, backtestReport);
 

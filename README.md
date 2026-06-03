@@ -80,6 +80,7 @@ gap_percent = gap_amount / team_cash * 100
 Positive values mean `group7` is ahead of that team. Negative values mean `group7` is behind that team.
 
 When WH1 warehouse inventory is at or above `monitor.warehouse_inventory_threshold`, the hourly email subject is prefixed with `ALERT`.
+That threshold is treated as a review checkpoint. Action Notes compare inventory with the demand of all regions currently served by the Calopeia warehouse before suggesting any inventory reduction.
 
 ## Required Secrets
 
@@ -151,6 +152,10 @@ Available metric keys:
 - `hq_lost_demand:Calopeia`
 - `hq_cash_balance:value`
 - `derived:days_of_cover`
+- `derived:calopeia_served_demand`
+- `derived:calopeia_served_lost_demand`
+- `derived:calopeia_served_shipments`
+- `derived:calopeia_served_region_count`
 - `derived:lost_demand_rate`
 - `derived:shipment_to_demand_ratio`
 - `derived:wip_to_demand_ratio`
@@ -167,7 +172,7 @@ Editable fields:
 - `auto_adjust.bounds`: min/max allowed values used when calculating suggested values.
 - `auto_adjust.policy_baseline`: current Factory and Warehouse policy values used as the baseline for suggested changes.
 
-The current days-of-cover research band is `2` to `5` days with target `3`, matching the high-cover alert at `> 5` days and the game rule that inventory becomes worthless on day `1460`.
+The current days-of-cover research band is `2` to `5` days with target `3`, calculated from the total demand of regions served by Calopeia. This matches the high-cover alert at `> 5` days and the game rule that inventory becomes worthless on day `1460`.
 `priority1` is still captured in policy tables for completeness, but it is intentionally excluded from recommendations because the assignment states priority level has no effect.
 
 Outputs:
