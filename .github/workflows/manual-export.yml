@@ -47,5 +47,9 @@ jobs:
             .monitor-state/policy_snapshot_latest.csv
             .monitor-state/adjustment_plan_latest.json
             .monitor-state/adjustment_plan_latest.csv
+            .monitor-state/backtest_latest.json
+            .monitor-state/backtest_summary_latest.csv
+            .monitor-state/backtest_daily_latest.csv
+            .monitor-state/backtest_report_latest.xlsx
           if-no-files-found: error
           include-hidden-files: true

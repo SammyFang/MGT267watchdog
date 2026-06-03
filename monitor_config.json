@@ -269,6 +269,17 @@
       }
     }
   },
+  "backtest": {
+    "enabled": true,
+    "data_source": "current trigger crawl plot data",
+    "horizon_days": 3,
+    "inventory_threshold_candidates": [250, 350, 450, 600, 800, 1000],
+    "days_of_cover_high_candidates": [3, 5, 7, 10],
+    "days_of_cover_low_candidates": [0.5, 1, 2],
+    "shipment_to_demand_ratio_candidates": [0.6, 0.8, 0.9, 1],
+    "excess_cover_days": 5,
+    "lost_demand_threshold": 0
+  },
   "email": {
     "enabled": true,
     "recipients": [
@@ -294,6 +305,10 @@
     "policy_snapshot_csv": ".monitor-state/policy_snapshot_latest.csv",
     "adjustment_plan_json": ".monitor-state/adjustment_plan_latest.json",
     "adjustment_plan_csv": ".monitor-state/adjustment_plan_latest.csv",
+    "backtest_json": ".monitor-state/backtest_latest.json",
+    "backtest_summary_csv": ".monitor-state/backtest_summary_latest.csv",
+    "backtest_daily_csv": ".monitor-state/backtest_daily_latest.csv",
+    "backtest_xlsx": ".monitor-state/backtest_report_latest.xlsx",
     "data_workbook_xlsx": ".monitor-state/supply_chain_data_latest.xlsx",
     "email_delivery_json": ".monitor-state/email_delivery_latest.json"
   },

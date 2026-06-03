@@ -796,6 +796,873 @@ function buildOperationalSnapshotCsv(snapshot) {
   ].join("\r\n")}\r\n`;
 }
 
+function sortedUniqueNumbers(values) {
+  return [...new Set(values.filter(Number.isFinite).map((value) => Number(value)))]
+    .sort((a, b) => a - b);
+}
+
+function roundMetric(value, digits = 4) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+function percentMetric(value) {
+  return Number.isFinite(value) ? `${value.toFixed(2)}%` : "";
+}
+
+function ratioMetric(value) {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+
+  return value.toFixed(3).replace(/\.?0+$/, "");
+}
+
+function seriesPoints(plotSnapshots, sourceId, seriesName) {
+  const plot = (plotSnapshots || []).find((item) => item.id === sourceId);
+
+  if (!plot) {
+    return [];
+  }
+
+  const normalized = String(seriesName || "").trim().toLowerCase();
+  const seriesIndex = plot.header
+    .slice(1)
+    .findIndex((header) => String(header || "").trim().toLowerCase() === normalized);
+
+  if (seriesIndex < 0) {
+    return [];
+  }
+
+  const rawColumn = seriesIndex + 1;
+  const formattedColumn = seriesIndex + 1;
+
+  return plot.rows
+    .map((row) => ({
+      day: row.raw[0],
+      dayRaw: row.formatted[0] || row.source[0],
+      value: row.raw[rawColumn],
+      valueRaw: row.formatted[formattedColumn] || row.source[formattedColumn],
+    }))
+    .filter((point) => Number.isFinite(point.day) && Number.isFinite(point.value))
+    .sort((a, b) => a.day - b.day);
+}
+
+function carriedForwardAccessor(points) {
+  let index = 0;
+  let current = null;
+
+  return (day) => {
+    while (index < points.length && points[index].day <= day + 1e-9) {
+      current = points[index];
+      index += 1;
+    }
+
+    return current;
+  };
+}
+
+function buildBacktestDailyRows(config, plotSnapshots) {
+  const sources = {
+    inventory: seriesPoints(plotSnapshots, "warehouse_inventory", "warehouse"),
+    demand: seriesPoints(plotSnapshots, "hq_demand", "Calopeia"),
+    lostDemand: seriesPoints(plotSnapshots, "hq_lost_demand", "Calopeia"),
+    shipments: seriesPoints(plotSnapshots, "warehouse_shipments", "Calopeia"),
+    wip: seriesPoints(plotSnapshots, "factory_wip", "Calopeia"),
+    cashBalance: seriesPoints(plotSnapshots, "hq_cash_balance", "value"),
+  };
+  const days = sortedUniqueNumbers(
+    Object.values(sources).flatMap((points) => points.map((point) => point.day)),
+  );
+  const accessors = Object.fromEntries(
+    Object.entries(sources).map(([name, points]) => [
+      name,
+      carriedForwardAccessor(points),
+    ]),
+  );
+  const alpha = Number(config.excel?.exponential_smoothing_alpha ?? 0.3);
+  const smoothingAlpha = Number.isFinite(alpha) ? alpha : 0.3;
+  const rows = [];
+  let previousInventory = null;
+  let previousCash = null;
+  let inventoryEma = null;
+
+  for (const day of days) {
+    const points = Object.fromEntries(
+      Object.entries(accessors).map(([name, accessor]) => [name, accessor(day)]),
+    );
+    const inventory = points.inventory?.value ?? null;
+    const demand = points.demand?.value ?? null;
+    const lostDemand = points.lostDemand?.value ?? null;
+    const shipments = points.shipments?.value ?? null;
+    const wip = points.wip?.value ?? null;
+    const cashBalance = points.cashBalance?.value ?? null;
+    const daysOfCover =
+      Number.isFinite(inventory) && Number.isFinite(demand) && demand > 0
+        ? inventory / demand
+        : null;
+    const lostDemandRate =
+      Number.isFinite(lostDemand) && Number.isFinite(demand) && demand > 0
+        ? (lostDemand / demand) * 100
+        : null;
+    const shipmentToDemandRatio =
+      Number.isFinite(shipments) && Number.isFinite(demand) && demand > 0
+        ? shipments / demand
+        : null;
+    const wipToDemandRatio =
+      Number.isFinite(wip) && Number.isFinite(demand) && demand > 0
+        ? wip / demand
+        : null;
+    const inventoryDelta =
+      Number.isFinite(inventory) && Number.isFinite(previousInventory)
+        ? inventory - previousInventory
+        : null;
+    const cashDelta =
+      Number.isFinite(cashBalance) && Number.isFinite(previousCash)
+        ? cashBalance - previousCash
+        : null;
+
+    if (Number.isFinite(inventory)) {
+      inventoryEma =
+        inventoryEma === null
+          ? inventory
+          : smoothingAlpha * inventory + (1 - smoothingAlpha) * inventoryEma;
+      previousInventory = inventory;
+    }
+
+    if (Number.isFinite(cashBalance)) {
+      previousCash = cashBalance;
+    }
+
+    rows.push({
+      day,
+      dayRaw:
+        points.inventory?.dayRaw ||
+        points.demand?.dayRaw ||
+        points.cashBalance?.dayRaw ||
+        String(day),
+      warehouseInventory: inventory,
+      demand,
+      lostDemand,
+      shipments,
+      factoryWip: wip,
+      cashBalance,
+      inventoryDelta,
+      cashDelta,
+      daysOfCover,
+      lostDemandRate,
+      shipmentToDemandRatio,
+      wipToDemandRatio,
+      inventoryEma,
+    });
+  }
+
+  return rows;
+}
+
+function futureEvent(rows, startIndex, horizonDays, predicate) {
+  const startDay = rows[startIndex]?.day;
+
+  if (!Number.isFinite(startDay)) {
+    return false;
+  }
+
+  for (let index = startIndex; index < rows.length; index += 1) {
+    const row = rows[index];
+
+    if (Number.isFinite(row.day) && row.day - startDay > horizonDays) {
+      break;
+    }
+
+    if (predicate(row)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function evaluateBacktestRule(rows, eligiblePredicate, alertPredicate, eventPredicate) {
+  let observations = 0;
+  let alerts = 0;
+  let events = 0;
+  let truePositive = 0;
+  let falsePositive = 0;
+  let falseNegative = 0;
+  let trueNegative = 0;
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+
+    if (!eligiblePredicate(row, index)) {
+      continue;
+    }
+
+    const isAlert = Boolean(alertPredicate(row, index));
+    const isEvent = Boolean(eventPredicate(row, index));
+    observations += 1;
+    alerts += isAlert ? 1 : 0;
+    events += isEvent ? 1 : 0;
+
+    if (isAlert && isEvent) {
+      truePositive += 1;
+    } else if (isAlert && !isEvent) {
+      falsePositive += 1;
+    } else if (!isAlert && isEvent) {
+      falseNegative += 1;
+    } else {
+      trueNegative += 1;
+    }
+  }
+
+  const precision =
+    truePositive + falsePositive > 0
+      ? truePositive / (truePositive + falsePositive)
+      : null;
+  const recall =
+    truePositive + falseNegative > 0
+      ? truePositive / (truePositive + falseNegative)
+      : null;
+  const f1 =
+    Number.isFinite(precision) && Number.isFinite(recall) && precision + recall > 0
+      ? (2 * precision * recall) / (precision + recall)
+      : null;
+
+  return {
+    observations,
+    alerts,
+    events,
+    truePositive,
+    falsePositive,
+    falseNegative,
+    trueNegative,
+    precision,
+    recall,
+    f1,
+  };
+}
+
+function backtestCandidateList(values, fallbackValues) {
+  const parsed = (Array.isArray(values) ? values : fallbackValues)
+    .map(Number)
+    .filter(Number.isFinite);
+
+  return sortedUniqueNumbers(parsed.length ? parsed : fallbackValues);
+}
+
+function summarizeBacktestRows(rows) {
+  const latest = [...rows]
+    .reverse()
+    .find(
+      (row) =>
+        Number.isFinite(row.warehouseInventory) ||
+        Number.isFinite(row.demand) ||
+        Number.isFinite(row.cashBalance),
+    );
+
+  if (!latest) {
+    return {};
+  }
+
+  return {
+    day: latest.dayRaw,
+    day_number: latest.day,
+    warehouse_inventory: latest.warehouseInventory,
+    demand: latest.demand,
+    lost_demand: latest.lostDemand,
+    shipments: latest.shipments,
+    factory_wip: latest.factoryWip,
+    cash_balance: latest.cashBalance,
+    inventory_delta: latest.inventoryDelta,
+    cash_delta: latest.cashDelta,
+    days_of_cover: latest.daysOfCover,
+    lost_demand_rate: latest.lostDemandRate,
+    shipment_to_demand_ratio: latest.shipmentToDemandRatio,
+    wip_to_demand_ratio: latest.wipToDemandRatio,
+    inventory_ema: latest.inventoryEma,
+  };
+}
+
+function candidateNote(test) {
+  const falseNegative = test.falseNegative ?? 0;
+  const falsePositive = test.falsePositive ?? 0;
+
+  if (test.events === 0) {
+    return "No matching historical event in the current crawl window.";
+  }
+
+  if (test.alerts === 0) {
+    return "No alerts would have fired at this threshold.";
+  }
+
+  if (falseNegative === 0 && falsePositive === 0) {
+    return "Matched all events in this historical window.";
+  }
+
+  if (falseNegative > falsePositive) {
+    return "Missed events are the main weakness.";
+  }
+
+  if (falsePositive > falseNegative) {
+    return "Extra alerts are the main weakness.";
+  }
+
+  return "Balanced misses and extra alerts.";
+}
+
+function configuredRuleThreshold(config, ruleId, fallback = null) {
+  const rule = (config.monitor?.alert_rules || []).find((item) => item.id === ruleId);
+  const value = Number(rule?.threshold);
+
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function bestBacktestCandidate(tests, category, preferredCandidate = null) {
+  const preferred = Number(preferredCandidate);
+  const candidates = tests
+    .filter((test) => test.category === category)
+    .sort((a, b) => {
+      const scoreDiff = (b.f1 ?? -1) - (a.f1 ?? -1);
+
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+
+      const missDiff = a.falseNegative - b.falseNegative;
+
+      if (missDiff !== 0) {
+        return missDiff;
+      }
+
+      const falsePositiveDiff = a.falsePositive - b.falsePositive;
+
+      if (falsePositiveDiff !== 0) {
+        return falsePositiveDiff;
+      }
+
+      if (Number.isFinite(preferred)) {
+        const distanceDiff =
+          Math.abs(a.candidate - preferred) - Math.abs(b.candidate - preferred);
+
+        if (distanceDiff !== 0) {
+          return distanceDiff;
+        }
+      }
+
+      return a.candidate - b.candidate;
+    });
+
+  return candidates[0] || null;
+}
+
+function buildBacktestReport(config, record, standingReport, plotSnapshots) {
+  const enabled = config.backtest?.enabled !== false;
+
+  if (!enabled) {
+    return {
+      enabled: false,
+      generated_at: record.checkedAt,
+      generated_at_local: record.checkedAtLocal,
+      reason: "backtest.enabled is false",
+    };
+  }
+
+  const rows = buildBacktestDailyRows(config, plotSnapshots);
+  const targets = config.auto_adjust?.targets || {};
+  const horizonDays = Number(config.backtest?.horizon_days ?? 3);
+  const excessCoverDays = Number(
+    config.backtest?.excess_cover_days ?? targets.days_of_cover_max ?? 5,
+  );
+  const lostDemandThreshold = Number(
+    config.backtest?.lost_demand_threshold ?? targets.lost_demand_max ?? 0,
+  );
+  const currentThreshold = Number(config.monitor?.warehouse_inventory_threshold);
+  const inventoryCandidates = backtestCandidateList(
+    config.backtest?.inventory_threshold_candidates,
+    [250, 350, currentThreshold, 600].filter(Number.isFinite),
+  );
+  const coverHighCandidates = backtestCandidateList(
+    config.backtest?.days_of_cover_high_candidates,
+    [3, 5, 7, 10],
+  );
+  const coverLowCandidates = backtestCandidateList(
+    config.backtest?.days_of_cover_low_candidates,
+    [0.5, 1, 2],
+  );
+  const shipmentRatioCandidates = backtestCandidateList(
+    config.backtest?.shipment_to_demand_ratio_candidates,
+    [0.6, 0.8, 0.9, 1],
+  );
+  const highCoverEvent = (row) =>
+    Number.isFinite(row.daysOfCover) && row.daysOfCover > excessCoverDays;
+  const shortageEvent = (_, index) =>
+    futureEvent(
+      rows,
+      index,
+      Number.isFinite(horizonDays) ? horizonDays : 3,
+      (row) =>
+        Number.isFinite(row.lostDemand) && row.lostDemand > lostDemandThreshold,
+    );
+  const tests = [];
+
+  for (const threshold of inventoryCandidates) {
+    const result = evaluateBacktestRule(
+      rows,
+      (row) => Number.isFinite(row.warehouseInventory) && Number.isFinite(row.daysOfCover),
+      (row) => row.warehouseInventory >= threshold,
+      highCoverEvent,
+    );
+
+    tests.push({
+      category: "warehouse_inventory_high",
+      indicator: "Warehouse inventory high threshold",
+      candidate: threshold,
+      operator: ">=",
+      event_definition: `days_of_cover > ${excessCoverDays}`,
+      ...result,
+    });
+  }
+
+  for (const threshold of coverHighCandidates) {
+    const result = evaluateBacktestRule(
+      rows,
+      (row) => Number.isFinite(row.daysOfCover),
+      (row) => row.daysOfCover >= threshold,
+      highCoverEvent,
+    );
+
+    tests.push({
+      category: "days_of_cover_high",
+      indicator: "Days of cover high threshold",
+      candidate: threshold,
+      operator: ">=",
+      event_definition: `days_of_cover > ${excessCoverDays}`,
+      ...result,
+    });
+  }
+
+  for (const threshold of coverLowCandidates) {
+    const result = evaluateBacktestRule(
+      rows,
+      (row, index) => Number.isFinite(row.daysOfCover) && rows.length > index,
+      (row) => row.daysOfCover <= threshold,
+      shortageEvent,
+    );
+
+    tests.push({
+      category: "days_of_cover_low",
+      indicator: "Days of cover low threshold",
+      candidate: threshold,
+      operator: "<=",
+      event_definition: `lost_demand > ${lostDemandThreshold} within ${horizonDays} days`,
+      ...result,
+    });
+  }
+
+  for (const threshold of shipmentRatioCandidates) {
+    const result = evaluateBacktestRule(
+      rows,
+      (row) => Number.isFinite(row.shipmentToDemandRatio),
+      (row) => row.shipmentToDemandRatio < threshold,
+      shortageEvent,
+    );
+
+    tests.push({
+      category: "shipment_to_demand_ratio_low",
+      indicator: "Shipment / demand ratio low threshold",
+      candidate: threshold,
+      operator: "<",
+      event_definition: `lost_demand > ${lostDemandThreshold} within ${horizonDays} days`,
+      ...result,
+    });
+  }
+
+  for (const test of tests) {
+    test.precision_text = Number.isFinite(test.precision)
+      ? percentMetric(test.precision * 100)
+      : "";
+    test.recall_text = Number.isFinite(test.recall)
+      ? percentMetric(test.recall * 100)
+      : "";
+    test.f1_text = Number.isFinite(test.f1) ? ratioMetric(test.f1) : "";
+    test.note = candidateNote(test);
+  }
+
+  const recommendations = [
+    bestBacktestCandidate(tests, "warehouse_inventory_high", currentThreshold),
+    bestBacktestCandidate(
+      tests,
+      "days_of_cover_high",
+      configuredRuleThreshold(config, "days_of_cover_high", targets.days_of_cover_max),
+    ),
+    bestBacktestCandidate(
+      tests,
+      "days_of_cover_low",
+      configuredRuleThreshold(config, "days_of_cover_low", targets.days_of_cover_min),
+    ),
+    bestBacktestCandidate(
+      tests,
+      "shipment_to_demand_ratio_low",
+      configuredRuleThreshold(
+        config,
+        "shipments_below_demand",
+        targets.shipment_to_demand_ratio_min,
+      ),
+    ),
+  ]
+    .filter(Boolean)
+    .map((test) => ({
+      category: test.category,
+      indicator: test.indicator,
+      suggested_threshold: test.candidate,
+      operator: test.operator,
+      event_definition: test.event_definition,
+      f1: roundMetric(test.f1, 4),
+      precision: roundMetric(test.precision, 4),
+      recall: roundMetric(test.recall, 4),
+      note: test.note,
+    }));
+
+  return {
+    enabled: true,
+    generated_at: record.checkedAt,
+    generated_at_local: record.checkedAtLocal,
+    target_team: record.targetTeam,
+    target_rank: record.targetRank,
+    target_cash: record.targetCash,
+    dashboard_day: record.dashboardDay,
+    data_source: config.backtest?.data_source || "current trigger crawl plot data",
+    local_dependency: "none",
+    horizon_days: Number.isFinite(horizonDays) ? horizonDays : 3,
+    excess_cover_days: Number.isFinite(excessCoverDays) ? excessCoverDays : 5,
+    lost_demand_threshold: Number.isFinite(lostDemandThreshold)
+      ? lostDemandThreshold
+      : 0,
+    observations: rows.length,
+    day_start: rows[0]?.dayRaw || "",
+    day_end: rows[rows.length - 1]?.dayRaw || "",
+    latest: summarizeBacktestRows(rows),
+    recommendations,
+    tests,
+    daily_rows: rows,
+    standing_reference: {
+      team: standingReport.target.team,
+      rank: standingReport.target.rank,
+      cash: standingReport.target.cash,
+    },
+  };
+}
+
+function buildBacktestSummaryCsv(report) {
+  const header = [
+    "category",
+    "indicator",
+    "operator",
+    "candidate",
+    "event_definition",
+    "observations",
+    "alerts",
+    "events",
+    "true_positive",
+    "false_positive",
+    "false_negative",
+    "true_negative",
+    "precision",
+    "recall",
+    "f1",
+    "note",
+  ];
+  const rows = (report?.tests || []).map((test) => [
+    test.category,
+    test.indicator,
+    test.operator,
+    test.candidate,
+    test.event_definition,
+    test.observations,
+    test.alerts,
+    test.events,
+    test.truePositive,
+    test.falsePositive,
+    test.falseNegative,
+    test.trueNegative,
+    roundMetric(test.precision, 4),
+    roundMetric(test.recall, 4),
+    roundMetric(test.f1, 4),
+    test.note,
+  ]);
+
+  return `\uFEFF${[
+    header.map(csvValue).join(","),
+    ...rows.map((row) => row.map(csvValue).join(",")),
+  ].join("\r\n")}\r\n`;
+}
+
+function buildBacktestDailyCsv(report) {
+  const header = [
+    "day",
+    "warehouse_inventory",
+    "demand",
+    "lost_demand",
+    "shipments",
+    "factory_wip",
+    "cash_balance",
+    "inventory_delta",
+    "cash_delta",
+    "days_of_cover",
+    "lost_demand_rate_percent",
+    "shipment_to_demand_ratio",
+    "wip_to_demand_ratio",
+    "inventory_ema",
+  ];
+  const rows = (report?.daily_rows || []).map((row) => [
+    row.dayRaw,
+    row.warehouseInventory,
+    row.demand,
+    row.lostDemand,
+    row.shipments,
+    row.factoryWip,
+    row.cashBalance,
+    row.inventoryDelta,
+    row.cashDelta,
+    row.daysOfCover,
+    row.lostDemandRate,
+    row.shipmentToDemandRatio,
+    row.wipToDemandRatio,
+    row.inventoryEma,
+  ]);
+
+  return `\uFEFF${[
+    header.map(csvValue).join(","),
+    ...rows.map((row) => row.map((value) => csvValue(value ?? "")).join(",")),
+  ].join("\r\n")}\r\n`;
+}
+
+function addBacktestSummaryWorksheet(workbook, usedNames, report) {
+  if (!report?.enabled) {
+    return;
+  }
+
+  const worksheet = workbook.addWorksheet(
+    safeWorksheetName("Backtest Summary", usedNames),
+  );
+  const latest = report.latest || {};
+
+  worksheet.addRow(["Field", "Value"]);
+  worksheet.addRow(["Generated at", report.generated_at_local]);
+  worksheet.addRow(["Data source", report.data_source]);
+  worksheet.addRow(["Local dependency", report.local_dependency]);
+  worksheet.addRow(["Target team", report.target_team]);
+  worksheet.addRow(["Target rank", report.target_rank]);
+  worksheet.addRow(["Target cash", report.target_cash]);
+  worksheet.addRow(["Dashboard day", report.dashboard_day]);
+  worksheet.addRow(["Observation days", `${report.day_start} to ${report.day_end}`]);
+  worksheet.addRow(["Observation count", report.observations]);
+  worksheet.addRow(["Latest inventory", latest.warehouse_inventory ?? ""]);
+  worksheet.addRow(["Latest demand", latest.demand ?? ""]);
+  worksheet.addRow(["Latest days of cover", roundMetric(latest.days_of_cover, 4) ?? ""]);
+  worksheet.addRow([
+    "Latest shipment / demand",
+    roundMetric(latest.shipment_to_demand_ratio, 4) ?? "",
+  ]);
+  worksheet.addRow(["Latest lost demand", latest.lost_demand ?? ""]);
+  worksheet.addRow(["Latest cash balance", latest.cash_balance ?? ""]);
+  worksheet.addRow(["Horizon days", report.horizon_days]);
+  worksheet.addRow(["Excess cover event", `days_of_cover > ${report.excess_cover_days}`]);
+  worksheet.addRow([
+    "Shortage event",
+    `lost_demand > ${report.lost_demand_threshold} within ${report.horizon_days} days`,
+  ]);
+
+  worksheet.addRow([]);
+  worksheet.addRow([
+    "Recommended indicator",
+    "Suggested threshold",
+    "Operator",
+    "Precision",
+    "Recall",
+    "F1",
+    "Basis",
+  ]);
+
+  for (const recommendation of report.recommendations || []) {
+    worksheet.addRow([
+      recommendation.indicator,
+      recommendation.suggested_threshold,
+      recommendation.operator,
+      recommendation.precision,
+      recommendation.recall,
+      recommendation.f1,
+      recommendation.note,
+    ]);
+  }
+
+  styleWorksheet(worksheet);
+}
+
+function addBacktestThresholdWorksheet(workbook, usedNames, report) {
+  if (!report?.enabled || !report.tests?.length) {
+    return;
+  }
+
+  const worksheet = workbook.addWorksheet(
+    safeWorksheetName("Backtest Thresholds", usedNames),
+  );
+
+  worksheet.addRow([
+    "category",
+    "indicator",
+    "operator",
+    "candidate",
+    "event_definition",
+    "observations",
+    "alerts",
+    "events",
+    "true_positive",
+    "false_positive",
+    "false_negative",
+    "true_negative",
+    "precision",
+    "recall",
+    "f1",
+    "note",
+  ]);
+
+  for (const test of report.tests) {
+    worksheet.addRow([
+      test.category,
+      test.indicator,
+      test.operator,
+      test.candidate,
+      test.event_definition,
+      test.observations,
+      test.alerts,
+      test.events,
+      test.truePositive,
+      test.falsePositive,
+      test.falseNegative,
+      test.trueNegative,
+      roundMetric(test.precision, 4) ?? "",
+      roundMetric(test.recall, 4) ?? "",
+      roundMetric(test.f1, 4) ?? "",
+      test.note,
+    ]);
+  }
+
+  styleWorksheet(worksheet);
+}
+
+function addBacktestDailyWorksheet(workbook, usedNames, report) {
+  if (!report?.enabled || !report.daily_rows?.length) {
+    return;
+  }
+
+  const worksheet = workbook.addWorksheet(safeWorksheetName("Backtest Daily", usedNames));
+
+  worksheet.addRow([
+    "day",
+    "warehouse_inventory",
+    "demand",
+    "lost_demand",
+    "shipments",
+    "factory_wip",
+    "cash_balance",
+    "inventory_delta",
+    "cash_delta",
+    "days_of_cover",
+    "lost_demand_rate_percent",
+    "shipment_to_demand_ratio",
+    "wip_to_demand_ratio",
+    "inventory_ema",
+  ]);
+
+  for (const row of report.daily_rows) {
+    worksheet.addRow([
+      row.dayRaw,
+      row.warehouseInventory ?? "",
+      row.demand ?? "",
+      row.lostDemand ?? "",
+      row.shipments ?? "",
+      row.factoryWip ?? "",
+      row.cashBalance ?? "",
+      row.inventoryDelta ?? "",
+      row.cashDelta ?? "",
+      roundMetric(row.daysOfCover, 4) ?? "",
+      roundMetric(row.lostDemandRate, 4) ?? "",
+      roundMetric(row.shipmentToDemandRatio, 4) ?? "",
+      roundMetric(row.wipToDemandRatio, 4) ?? "",
+      roundMetric(row.inventoryEma, 4) ?? "",
+    ]);
+  }
+
+  styleWorksheet(worksheet);
+}
+
+function addBacktestWorksheets(workbook, usedNames, report) {
+  addBacktestSummaryWorksheet(workbook, usedNames, report);
+  addBacktestThresholdWorksheet(workbook, usedNames, report);
+  addBacktestDailyWorksheet(workbook, usedNames, report);
+}
+
+async function buildBacktestWorkbookBuffer(report) {
+  if (!report?.enabled) {
+    return null;
+  }
+
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "MGT267 Watchdog";
+  workbook.created = new Date(report.generated_at);
+  workbook.modified = new Date(report.generated_at);
+  workbook.calcProperties.fullCalcOnLoad = true;
+  const usedNames = new Set();
+
+  addBacktestWorksheets(workbook, usedNames, report);
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+}
+
+async function writeBacktestOutputs(config, report) {
+  const jsonPath = path.resolve(
+    process.cwd(),
+    config.output.backtest_json || ".monitor-state/backtest_latest.json",
+  );
+  const summaryCsvPath = path.resolve(
+    process.cwd(),
+    config.output.backtest_summary_csv ||
+      ".monitor-state/backtest_summary_latest.csv",
+  );
+  const dailyCsvPath = path.resolve(
+    process.cwd(),
+    config.output.backtest_daily_csv || ".monitor-state/backtest_daily_latest.csv",
+  );
+  const workbookPath = path.resolve(
+    process.cwd(),
+    config.output.backtest_xlsx || ".monitor-state/backtest_report_latest.xlsx",
+  );
+
+  ensureDir(path.dirname(jsonPath));
+  fs.writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  fs.writeFileSync(summaryCsvPath, buildBacktestSummaryCsv(report), "utf8");
+  fs.writeFileSync(dailyCsvPath, buildBacktestDailyCsv(report), "utf8");
+
+  const buffer = await buildBacktestWorkbookBuffer(report);
+
+  if (buffer) {
+    fs.writeFileSync(workbookPath, buffer);
+  }
+
+  return {
+    jsonPath,
+    summaryCsvPath,
+    dailyCsvPath,
+    workbookPath: buffer ? workbookPath : "",
+  };
+}
+
 function buildPolicySnapshotCsv(snapshot = []) {
   const header = [
     "page_id",
@@ -1731,10 +2598,14 @@ async function buildDataWorkbookBuffer(
       standingReport,
       options.policySnapshot,
     );
+  const backtestReport =
+    options.backtestReport ||
+    buildBacktestReport(config, record, standingReport, plotSnapshots);
 
   addSummaryWorksheet(workbook, usedNames, config, record);
   addWatchlistWorksheet(workbook, usedNames, watchlist);
   addAdjustmentPlanWorksheet(workbook, usedNames, adjustmentPlan);
+  addBacktestWorksheets(workbook, usedNames, backtestReport);
   addPolicySummaryWorksheet(workbook, usedNames, options.policySnapshot || []);
   addPolicyTablesWorksheet(workbook, usedNames, options.policySnapshot || []);
 
@@ -2137,6 +3008,43 @@ function buildPolicyLines(policySnapshot = []) {
     if (controls.length) {
       lines.push(`- ${controls.join(" | ")}`);
     }
+  }
+
+  return lines;
+}
+
+function buildBacktestLines(report) {
+  if (!report?.enabled) {
+    return [];
+  }
+
+  const latest = report.latest || {};
+  const lines = [
+    "",
+    "Backtest",
+    `Source: ${report.data_source}; local dependency: ${report.local_dependency}`,
+    `Window: day ${report.day_start} to ${report.day_end}; observations=${report.observations}`,
+    `Latest: inventory=${latest.warehouse_inventory ?? "n/a"} | demand=${latest.demand ?? "n/a"} | days_cover=${ratioMetric(latest.days_of_cover) || "n/a"} | shipment_demand=${ratioMetric(latest.shipment_to_demand_ratio) || "n/a"}`,
+  ];
+
+  for (const recommendation of report.recommendations || []) {
+    lines.push(
+      [
+        recommendation.indicator,
+        `${recommendation.operator} ${recommendation.suggested_threshold}`,
+        `precision=${
+          Number.isFinite(recommendation.precision)
+            ? percentMetric(recommendation.precision * 100)
+            : "n/a"
+        }`,
+        `recall=${
+          Number.isFinite(recommendation.recall)
+            ? percentMetric(recommendation.recall * 100)
+            : "n/a"
+        }`,
+        `f1=${ratioMetric(recommendation.f1) || "n/a"}`,
+      ].join(" | "),
+    );
   }
 
   return lines;
@@ -2744,6 +3652,7 @@ function buildReportText(config, record, standingReport, options = {}) {
     `Source: ${options.recommendations?.source || "n/a"}`,
     ...buildAdjustmentPlanLines(options.adjustmentPlan),
     ...buildMetricAlertLines(options.metricAlerts),
+    ...buildBacktestLines(options.backtestReport),
     ...buildOperationalLines(options.operationalSnapshot),
     ...buildPolicyLines(options.policySnapshot),
     "",
@@ -3040,6 +3949,52 @@ function buildMetricAlertsHtml(alerts = []) {
   ].join("");
 }
 
+function buildBacktestHtml(report) {
+  if (!report?.enabled) {
+    return "";
+  }
+
+  const latest = report.latest || {};
+  const recommendations = report.recommendations || [];
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Backtest Snapshot</div>',
+    '<div style="border:1px solid #d8dee9;border-radius:8px;background:#f8fafc;padding:10px 12px;margin-bottom:10px;color:#334155;font-size:13px;line-height:1.45;">',
+    `Source: ${escapeHtml(report.data_source)}; local dependency: ${escapeHtml(report.local_dependency)}. `,
+    `Window: day ${escapeHtml(report.day_start)} to ${escapeHtml(report.day_end)} (${escapeHtml(report.observations)} observations). `,
+    `Latest inventory ${escapeHtml(latest.warehouse_inventory ?? "n/a")}, demand ${escapeHtml(latest.demand ?? "n/a")}, days cover ${escapeHtml(ratioMetric(latest.days_of_cover) || "n/a")}.`,
+    "</div>",
+    recommendations.length
+      ? [
+          '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #d8dee9;border-radius:8px;overflow:hidden;font-size:13px;">',
+          '<thead><tr style="background:#e2e8f0;color:#334155;">',
+          '<th style="padding:9px;text-align:left;">Indicator</th>',
+          '<th style="padding:9px;text-align:right;">Threshold</th>',
+          '<th style="padding:9px;text-align:right;">Precision</th>',
+          '<th style="padding:9px;text-align:right;">Recall</th>',
+          '<th style="padding:9px;text-align:right;">F1</th>',
+          "</tr></thead>",
+          "<tbody>",
+          ...recommendations.map((item) =>
+            [
+              "<tr>",
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;font-weight:700;">${escapeHtml(item.indicator)}</td>`,
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(`${item.operator} ${item.suggested_threshold}`)}</td>`,
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(Number.isFinite(item.precision) ? percentMetric(item.precision * 100) : "n/a")}</td>`,
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(Number.isFinite(item.recall) ? percentMetric(item.recall * 100) : "n/a")}</td>`,
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(ratioMetric(item.f1) || "n/a")}</td>`,
+              "</tr>",
+            ].join(""),
+          ),
+          "</tbody>",
+          "</table>",
+        ].join("")
+      : "",
+    "</div>",
+  ].join("");
+}
+
 function buildEmailFooterHtml(config) {
   const footer = config.email.footer || {};
   const text = footer.text || "Developed by Yung-Sian Fang";
@@ -3103,6 +4058,7 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     buildRecommendationsHtml(options.recommendations),
     buildAdjustmentPlanHtml(options.adjustmentPlan),
     buildMetricAlertsHtml(options.metricAlerts),
+    buildBacktestHtml(options.backtestReport),
     !isWarning ? buildOperationalSnapshotHtml(options.operationalSnapshot) : "",
     !isWarning ? buildPolicySnapshotHtml(options.policySnapshot) : "",
     '<div style="padding:0 22px 18px;">',
@@ -3185,6 +4141,8 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
         watchlist,
         operationalSnapshot: options.operationalSnapshot,
         adjustmentPlan,
+        policySnapshot: options.policySnapshot || [],
+        backtestReport: options.backtestReport,
       },
     );
 
@@ -3483,6 +4441,13 @@ async function runOnce(config) {
     standingReport,
     policySnapshot,
   );
+  const backtestReport = buildBacktestReport(
+    config,
+    record,
+    standingReport,
+    plotSnapshots,
+  );
+  const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
   let emailSent = false;
   const reportDecision = shouldSendReportNow(config, previousState);
 
@@ -3494,6 +4459,7 @@ async function runOnce(config) {
       watchlist,
       adjustmentPlan,
       policySnapshot,
+      backtestReport,
     });
   } else if (config.monitor.send_report_every_run) {
     console.log(`Email report skipped: ${reportDecision.reason}`);
@@ -3533,6 +4499,7 @@ async function runOnce(config) {
       watchlist,
       adjustmentPlan,
       policySnapshot,
+      backtestReport,
     },
   );
   appendHistory(historyPath, { ...record, emailSent });
@@ -3556,6 +4523,16 @@ async function runOnce(config) {
         last_alerts: watchlist.filter((item) => item.isAlert),
         last_operational_metrics: operationalSnapshot.metrics,
         last_adjustment_plan: adjustmentPlan,
+        last_backtest: {
+          generated_at: backtestReport.generated_at,
+          data_source: backtestReport.data_source,
+          local_dependency: backtestReport.local_dependency,
+          observations: backtestReport.observations,
+          day_start: backtestReport.day_start,
+          day_end: backtestReport.day_end,
+          latest: backtestReport.latest,
+          recommendations: backtestReport.recommendations,
+        },
         last_policy_pages: policySnapshot,
         last_email_sent_at: emailSent
           ? checkedAt
@@ -3588,6 +4565,9 @@ async function runOnce(config) {
   console.log(`Operational snapshot: ${operationalCsvPath}`);
   console.log(`Policy snapshot: ${policySnapshotCsvPath}`);
   console.log(`Adjustment plan: ${adjustmentPlanJsonPath}`);
+  console.log(`Backtest JSON: ${backtestOutputs.jsonPath}`);
+  console.log(`Backtest summary: ${backtestOutputs.summaryCsvPath}`);
+  console.log(`Backtest workbook: ${backtestOutputs.workbookPath || "not written"}`);
   console.log(
     `Excel data workbook: ${workbookWritten ? dataWorkbookPath : "not written"}`,
   );
@@ -3625,6 +4605,13 @@ async function sendTestEmails(config) {
   const baseRecord = createRecord(config, dashboard, inventoryTable, standingReport, {
     checkedAt,
   });
+  const backtestReport = buildBacktestReport(
+    config,
+    baseRecord,
+    standingReport,
+    plotSnapshots,
+  );
+  const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
 
   const hourlySent = await sendReportEmail(config, baseRecord, standingReport, {
     kind: "hourly",
@@ -3632,6 +4619,7 @@ async function sendTestEmails(config) {
     operationalSnapshot,
     plotSnapshots,
     policySnapshot,
+    backtestReport,
   });
 
   console.log("Test email summary:");
@@ -3641,6 +4629,7 @@ async function sendTestEmails(config) {
   console.log(`Dashboard day: ${baseRecord.dashboardDay}`);
   console.log(`Warehouse inventory: ${baseRecord.warehouseInventory}`);
   console.log(`Operational metrics: ${Object.keys(operationalSnapshot.metrics).length}`);
+  console.log(`Backtest workbook: ${backtestOutputs.workbookPath || "not written"}`);
 }
 
 async function sendWarningEmail(config) {
@@ -3657,6 +4646,13 @@ async function sendWarningEmail(config) {
   );
   const watchlist = buildWatchlist(config, metricCatalog, "warning");
   const warningAlerts = watchlist.filter((item) => item.isAlert);
+  const backtestReport = buildBacktestReport(
+    config,
+    record,
+    standingReport,
+    plotSnapshots,
+  );
+  const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
   let emailSent = false;
 
   if (warningAlerts.length > 0) {
@@ -3673,6 +4669,7 @@ async function sendWarningEmail(config) {
         metricCatalog,
         watchlist,
         metricAlerts: warningAlerts,
+        backtestReport,
       },
     );
   }
@@ -3685,11 +4682,41 @@ async function sendWarningEmail(config) {
   console.log(`Warehouse inventory: ${record.warehouseInventory}`);
   console.log(`Inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
   console.log(`Warning rule alerts: ${warningAlerts.length}`);
+  console.log(`Backtest workbook: ${backtestOutputs.workbookPath || "not written"}`);
   for (const alert of warningAlerts) {
     console.log(
       `- ${alert.label}: ${alert.currentRaw || "n/a"} ${alert.operator} ${alert.thresholdRaw}`,
     );
   }
+}
+
+async function runBacktestOnly(config) {
+  ensureDir(path.resolve(process.cwd(), config.output.state_dir));
+  const { dashboard, inventoryTable, plotSnapshots, standingReport } =
+    await crawl(config);
+  const checkedAt = new Date().toISOString();
+  const record = createRecord(config, dashboard, inventoryTable, standingReport, {
+    checkedAt,
+  });
+  const backtestReport = buildBacktestReport(
+    config,
+    record,
+    standingReport,
+    plotSnapshots,
+  );
+  const outputs = await writeBacktestOutputs(config, backtestReport);
+
+  console.log("Backtest summary:");
+  console.log(`Checked at: ${record.checkedAtLocal} (${config.crawl.timezone})`);
+  console.log(`Target team: ${record.targetTeam}`);
+  console.log(`Dashboard day: ${record.dashboardDay}`);
+  console.log(`Observations: ${backtestReport.observations}`);
+  console.log(`Window: ${backtestReport.day_start} to ${backtestReport.day_end}`);
+  console.log(`Data source: ${backtestReport.data_source}`);
+  console.log(`Local dependency: ${backtestReport.local_dependency}`);
+  console.log(`Backtest JSON: ${outputs.jsonPath}`);
+  console.log(`Backtest summary: ${outputs.summaryCsvPath}`);
+  console.log(`Backtest workbook: ${outputs.workbookPath || "not written"}`);
 }
 
 async function main() {
@@ -3711,6 +4738,11 @@ async function main() {
 
   if (process.argv.includes("--warning-email")) {
     await sendWarningEmail(config);
+    return;
+  }
+
+  if (process.argv.includes("--backtest")) {
+    await runBacktestOnly(config);
     return;
   }
 

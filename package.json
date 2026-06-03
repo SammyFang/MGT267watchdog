@@ -8,6 +8,7 @@
     "monitor": "node src/monitor.js --once",
     "test-email": "node src/monitor.js --test-email",
     "warning-email": "node src/monitor.js --warning-email",
+    "backtest": "node src/monitor.js --backtest",
     "watch": "node src/monitor.js --watch"
   },
   "dependencies": {

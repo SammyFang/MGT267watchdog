@@ -16,6 +16,7 @@ Most settings are in `monitor_config.json`:
 - `monitor.metric_thresholds`: optional min/max alert thresholds for the hourly report's warehouse, factory, and headquarters metrics.
 - `ai.enabled`, `ai.model`, `ai.api_key_env`: Gemini recommendation settings.
 - `auto_adjust`: research-only adjustment planner settings. It writes suggested policy changes to email, JSON/CSV, and Excel, but never submits game forms.
+- `backtest`: per-trigger backtest settings. It uses the plot data crawled during the current GitHub Actions run and has no local file dependency.
 - `email.recipients`: notification recipient list.
 - `email.attach_excel`: attach the full data workbook to report emails.
 - `email.footer`: email footer text and URL.
@@ -63,7 +64,7 @@ To download the latest full crawler workbook without sending email or changing t
 4. Open the completed run.
 5. Download the `latest-crawl-data` artifact.
 
-The artifact includes `supply_chain_data_latest.xlsx` plus the latest JSON/CSV outputs, including `policy_snapshot_latest.csv` and the research-only `adjustment_plan_latest` files. This workflow does not restore or save the scheduled monitor cache.
+The artifact includes `supply_chain_data_latest.xlsx` plus the latest JSON/CSV outputs, including `policy_snapshot_latest.csv`, the research-only `adjustment_plan_latest` files, and the per-trigger `backtest_latest` outputs. This workflow does not restore or save the scheduled monitor cache.
 
 ## Standing Gap Formula
 
@@ -171,6 +172,29 @@ Outputs:
 - JSON: `.monitor-state/adjustment_plan_latest.json`
 - CSV: `.monitor-state/adjustment_plan_latest.csv`
 
+## Per-Trigger Backtest
+
+Every `monitor`, `warning-email`, `test-email`, and manual export trigger runs a fresh backtest from the plot data crawled during that same run. It does not rely on local `.monitor-state` files. Restored GitHub cache is only used for report throttling and previous-run deltas, not as the backtest data source.
+
+Editable fields are in `backtest`:
+
+- `inventory_threshold_candidates`: warehouse inventory thresholds to compare.
+- `days_of_cover_high_candidates`: high-cover thresholds to compare.
+- `days_of_cover_low_candidates`: low-cover thresholds to compare against future lost demand.
+- `shipment_to_demand_ratio_candidates`: shipment coverage thresholds to compare against future lost demand.
+- `horizon_days`: future window for shortage-event scoring.
+- `excess_cover_days`: high-cover event definition.
+- `lost_demand_threshold`: lost-demand event definition.
+
+Outputs:
+
+- Email section: `Backtest Snapshot`
+- Excel tabs: `Backtest Summary`, `Backtest Thresholds`, `Backtest Daily`
+- JSON: `.monitor-state/backtest_latest.json`
+- CSV: `.monitor-state/backtest_summary_latest.csv`
+- CSV: `.monitor-state/backtest_daily_latest.csv`
+- XLSX: `.monitor-state/backtest_report_latest.xlsx`
+
 ## Run Locally
 
 ```powershell
@@ -193,6 +217,12 @@ $env:EMAIL_DRY_RUN='1'; npm run warning-email
 $env:EMAIL_DRY_RUN='1'; npm run test-email
 ```
 
+Run only a fresh crawler backtest without sending mail:
+
+```powershell
+$env:EMAIL_ENABLED='false'; $env:EMAIL_DRY_RUN='1'; npm run backtest
+```
+
 Hourly reports include:
 
 - warehouse inventory and shipments
@@ -203,6 +233,7 @@ Hourly reports include:
 - one `.xlsx` attachment with every scraped Data table in separate tabs, plus summary, standing, and policy tabs
 - a `Watchlist` tab and EMA / Delta vs EMA formula columns on each Data tab
 - an `Adjustment Plan` tab with research-only suggested policy changes and safety flags
+- `Backtest` tabs generated from the same trigger's crawled plot data
 
 The `Email Smoke Test` GitHub workflow sends one real test email with repository secrets:
 
@@ -226,6 +257,10 @@ Output files are written to `.monitor-state/`:
 - `policy_snapshot_latest.csv`
 - `adjustment_plan_latest.json`
 - `adjustment_plan_latest.csv`
+- `backtest_latest.json`
+- `backtest_summary_latest.csv`
+- `backtest_daily_latest.csv`
+- `backtest_report_latest.xlsx`
 - `supply_chain_data_latest.xlsx`
 - `email_delivery_latest.json`
 
