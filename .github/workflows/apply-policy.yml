@@ -1,11 +1,16 @@
 name: Apply Recommended Policy
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Apply Policy ({0}, dry_run={1}, mode={2})', inputs.confirm, inputs.dry_run, inputs.apply_mode) || 'Apply Policy push dry-run' }}
 
 on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: "Type APPLY to submit accepted changes. Any other value performs a dry run only."
+        description: "Choose APPLY to submit accepted changes. DRY_RUN validates only."
         required: true
+        type: choice
+        options:
+          - DRY_RUN
+          - APPLY
         default: "DRY_RUN"
       apply_mode:
         description: "recommended uses latest safe values. custom starts from latest safe values and applies optional overrides below."

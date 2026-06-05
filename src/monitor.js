@@ -3006,6 +3006,53 @@ function policyApplyCsv(report) {
   ].join("\r\n")}\r\n`;
 }
 
+function policyApplyMarkdownSummary(report) {
+  const changes = report.changes || [];
+  const acceptedCount = changes.filter((item) => item.accepted).length;
+  const appliedCount = changes.filter((item) => item.applied).length;
+  const verifiedCount = changes.filter((item) => item.verified).length;
+  const status = report.dry_run
+    ? "DRY RUN ONLY - no game forms were submitted."
+    : appliedCount > 0
+      ? "GAME UPDATE SUBMITTED."
+      : "NO GAME UPDATE - no accepted changes were submitted.";
+  const rows = changes.map((item) =>
+    [
+      item.area,
+      item.parameter,
+      item.current ?? "",
+      item.suggested ?? "",
+      item.delta ?? "",
+      item.accepted ? "yes" : "no",
+      item.applied ? "yes" : "no",
+      item.verified ? "yes" : "no",
+      item.reject_reason || item.reason || "",
+    ]
+      .map((value) => String(value).replace(/\|/g, "\\|"))
+      .join(" | "),
+  );
+
+  return [
+    "## Policy Apply Result",
+    "",
+    `**Status:** ${status}`,
+    "",
+    `- Mode: ${report.mode}`,
+    `- Confirm: ${report.confirm}`,
+    `- Dry run: ${report.dry_run ? "yes" : "no"}`,
+    `- Target: ${report.target_team} rank ${report.target_rank ?? "n/a"} cash ${report.target_cash ?? "n/a"} day ${report.dashboard_day ?? "n/a"}`,
+    `- Warehouse inventory: ${report.warehouse_inventory ?? "n/a"}`,
+    `- Posture: ${report.posture ?? "n/a"}`,
+    `- Conflicts: ${(report.conflicts || []).length}`,
+    `- Accepted / applied / verified: ${acceptedCount} / ${appliedCount} / ${verifiedCount}`,
+    "",
+    "| Area | Field | Current | Suggested | Delta | Accepted | Applied | Verified | Reason |",
+    "| --- | --- | ---: | ---: | ---: | --- | --- | --- | --- |",
+    ...(rows.length ? rows.map((row) => `| ${row} |`) : ["| n/a | n/a |  |  |  | no | no | no | No candidate changes. |"]),
+    "",
+  ].join("\n");
+}
+
 function writePolicyApplyOutputs(config, report) {
   const jsonPath = path.resolve(
     process.cwd(),
@@ -3019,6 +3066,14 @@ function writePolicyApplyOutputs(config, report) {
   ensureDir(path.dirname(jsonPath));
   fs.writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   fs.writeFileSync(csvPath, policyApplyCsv(report), "utf8");
+
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    fs.appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      `${policyApplyMarkdownSummary(report)}\n`,
+      "utf8",
+    );
+  }
 
   return { jsonPath, csvPath };
 }
