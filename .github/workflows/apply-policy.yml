@@ -23,9 +23,6 @@ on:
           - "false"
           - "true"
         default: "false"
-  push:
-    branches:
-      - main
       factory_order_point:
         description: "Custom mode only. Blank keeps current."
         required: false
@@ -58,6 +55,9 @@ on:
           - "false"
           - "true"
         default: "false"
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
