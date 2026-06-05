@@ -284,6 +284,16 @@ function selectedOption(selectHtml) {
   };
 }
 
+function selectOptions(selectHtml) {
+  return [...String(selectHtml || "").matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/gi)].map(
+    (option) => ({
+      value: htmlAttribute(option[1], "value"),
+      text: compactText(option[2]),
+      selected: /\bselected\b/i.test(option[1]),
+    }),
+  );
+}
+
 function cellTextWithControls(html) {
   let normalized = String(html || "")
     .replace(/<select\b[\s\S]*?<\/select>/gi, (selectHtml) => {
@@ -329,6 +339,7 @@ function extractFormControls(html) {
         type: "select",
         value: selected.value,
         text: selected.text,
+        options: selectOptions(selectMatch[0]),
         checked: "",
       });
     }
@@ -2759,6 +2770,522 @@ function buildAdjustmentPlanCsv(plan) {
   ].join("\r\n")}\r\n`;
 }
 
+function policyApplyWorkflowUrl(config) {
+  if (config.policy_apply?.workflow_url) {
+    return config.policy_apply.workflow_url;
+  }
+
+  const repository = optionalEnv("GITHUB_REPOSITORY", "");
+  return repository
+    ? `https://github.com/${repository}/actions/workflows/apply-policy.yml`
+    : "";
+}
+
+function controlNameForPolicyParameter(parameter) {
+  return {
+    shipping_method: "ship1",
+    order_point: "point1",
+    quantity: "quant1",
+  }[parameter];
+}
+
+function pageIdForPolicyArea(area) {
+  return {
+    factory: "factory_calopeia",
+    warehouse: "warehouse_calopeia",
+  }[area];
+}
+
+function policyAreaCurrentValue(config, policySnapshot, area, parameter) {
+  const baseline = policyBaseline(config, policySnapshot);
+  return baseline?.[area]?.[parameter];
+}
+
+function strictShippingValue(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+
+  if (normalized === "mail" || normalized === "truck") {
+    return normalized;
+  }
+
+  return null;
+}
+
+function numericPolicyNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number) : null;
+}
+
+function samePolicyValue(parameter, left, right) {
+  if (parameter === "shipping_method") {
+    return strictShippingValue(left) === strictShippingValue(right);
+  }
+
+  return numericPolicyNumber(left) === numericPolicyNumber(right);
+}
+
+function candidatePolicyChangesFromPlan(config, plan, policySnapshot, options = {}) {
+  const allowShipping = options.allowShipping === true;
+  const candidates = new Map();
+  const conflicts = [];
+
+  for (const item of plan?.recommendations || []) {
+    const area = String(item.area || "").toLowerCase();
+    const parameter = String(item.parameter || "").toLowerCase();
+    const control = controlNameForPolicyParameter(parameter);
+
+    if (!["factory", "warehouse"].includes(area) || !control) {
+      continue;
+    }
+
+    if (parameter === "shipping_method" && !allowShipping) {
+      continue;
+    }
+
+    if (["hold", "review", "tighten"].includes(String(item.direction || "").toLowerCase())) {
+      continue;
+    }
+
+    const current = policyAreaCurrentValue(config, policySnapshot, area, parameter);
+    let suggested = item.suggested;
+
+    if (parameter === "shipping_method") {
+      suggested = strictShippingValue(suggested);
+    } else {
+      suggested = numericPolicyNumber(suggested);
+    }
+
+    if (suggested === null || suggested === undefined || samePolicyValue(parameter, current, suggested)) {
+      continue;
+    }
+
+    const key = `${area}.${parameter}`;
+    const candidate = {
+      area,
+      parameter,
+      control,
+      current,
+      suggested,
+      direction: item.direction || "",
+      urgency: item.urgency || "",
+      confidence: item.confidence || "",
+      reason: item.reason || "",
+      source: "latest recommendation",
+    };
+
+    if (candidates.has(key)) {
+      const existing = candidates.get(key);
+      if (!samePolicyValue(parameter, existing.suggested, candidate.suggested)) {
+        conflicts.push({
+          area,
+          parameter,
+          first: existing.suggested,
+          second: candidate.suggested,
+          reason: "Conflicting recommendations for the same field.",
+        });
+      }
+      continue;
+    }
+
+    candidates.set(key, candidate);
+  }
+
+  return {
+    changes: [...candidates.values()],
+    conflicts,
+  };
+}
+
+function customPolicyChangesFromEnv(config, policySnapshot) {
+  const specs = [
+    ["POLICY_FACTORY_ORDER_POINT", "factory", "order_point"],
+    ["POLICY_FACTORY_QUANTITY", "factory", "quantity"],
+    ["POLICY_FACTORY_SHIPPING_METHOD", "factory", "shipping_method"],
+    ["POLICY_WAREHOUSE_ORDER_POINT", "warehouse", "order_point"],
+    ["POLICY_WAREHOUSE_QUANTITY", "warehouse", "quantity"],
+    ["POLICY_WAREHOUSE_SHIPPING_METHOD", "warehouse", "shipping_method"],
+  ];
+  const changes = [];
+
+  for (const [envName, area, parameter] of specs) {
+    const raw = optionalEnv(envName, "").trim();
+
+    if (!raw) {
+      continue;
+    }
+
+    const suggested =
+      parameter === "shipping_method" ? strictShippingValue(raw) : numericPolicyNumber(raw);
+    const current = policyAreaCurrentValue(config, policySnapshot, area, parameter);
+
+    changes.push({
+      area,
+      parameter,
+      control: controlNameForPolicyParameter(parameter),
+      current,
+      suggested,
+      direction:
+        parameter === "shipping_method"
+          ? "manual"
+          : Number(suggested) > Number(current)
+            ? "increase"
+            : Number(suggested) < Number(current)
+              ? "decrease"
+              : "hold",
+      urgency: "manual",
+      confidence: "manual",
+      reason: `Manual workflow input ${envName}.`,
+      source: "workflow input",
+    });
+  }
+
+  return {
+    changes,
+    conflicts: [],
+  };
+}
+
+function policyApplyCsv(report) {
+  const header = [
+    "area",
+    "parameter",
+    "current",
+    "suggested",
+    "delta",
+    "source",
+    "accepted",
+    "applied",
+    "verified",
+    "reason",
+  ];
+  const rows = (report.changes || []).map((item) => [
+    item.area,
+    item.parameter,
+    item.current ?? "",
+    item.suggested ?? "",
+    item.delta ?? "",
+    item.source,
+    item.accepted ? "yes" : "no",
+    item.applied ? "yes" : "no",
+    item.verified ? "yes" : "no",
+    item.reject_reason || item.reason || "",
+  ]);
+
+  return `\uFEFF${[
+    header.map(csvValue).join(","),
+    ...rows.map((row) => row.map(csvValue).join(",")),
+  ].join("\r\n")}\r\n`;
+}
+
+function writePolicyApplyOutputs(config, report) {
+  const jsonPath = path.resolve(
+    process.cwd(),
+    config.output.policy_apply_json || ".monitor-state/policy_apply_latest.json",
+  );
+  const csvPath = path.resolve(
+    process.cwd(),
+    config.output.policy_apply_csv || ".monitor-state/policy_apply_latest.csv",
+  );
+
+  ensureDir(path.dirname(jsonPath));
+  fs.writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  fs.writeFileSync(csvPath, policyApplyCsv(report), "utf8");
+
+  return { jsonPath, csvPath };
+}
+
+function validatePolicyChanges(config, changes, context = {}) {
+  const cfg = config.policy_apply || {};
+  const guardrails = cfg.guardrails || {};
+  const maxPerRun = Number(cfg.max_numeric_changes_per_run ?? 4);
+  const maxChange = {
+    ...(config.auto_adjust?.max_change_per_run || {}),
+    ...(cfg.max_change_per_apply || {}),
+  };
+  const bounds = config.auto_adjust?.bounds || {};
+  const metricCatalog = context.metricCatalog;
+  const record = context.record;
+  const coverTargets = coverageTargets(config, record);
+  const rules = gameRules(config);
+  const lostDemand =
+    metricValue(metricCatalog, "derived:calopeia_served_lost_demand") ??
+    metricValue(metricCatalog, "hq_lost_demand:Calopeia");
+  const daysOfCover = metricValue(metricCatalog, "derived:days_of_cover");
+  const allowShipping = context.allowShipping === true;
+  let acceptedNumeric = 0;
+
+  return changes.map((change) => {
+    const result = {
+      ...change,
+      delta: "",
+      accepted: false,
+      applied: false,
+      verified: false,
+      reject_reason: "",
+    };
+
+    if (cfg.enabled === false) {
+      result.reject_reason = "policy_apply.enabled is false.";
+      return result;
+    }
+
+    if (!pageIdForPolicyArea(change.area) || !controlNameForPolicyParameter(change.parameter)) {
+      result.reject_reason = "Unsupported policy field.";
+      return result;
+    }
+
+    if (change.parameter === "priority" || guardrails.block_priority_changes !== false && /priority/i.test(change.parameter)) {
+      result.reject_reason = "Priority level is not applied because the assignment states it has no effect.";
+      return result;
+    }
+
+    if (change.parameter === "shipping_method") {
+      const suggested = strictShippingValue(change.suggested);
+
+      if (!suggested) {
+        result.reject_reason = "Shipping method must be exactly mail or truck.";
+        return result;
+      }
+
+      if (!allowShipping || cfg.allow_shipping_method_change !== true) {
+        result.reject_reason = "Shipping method changes require explicit enablement and are disabled by default.";
+        return result;
+      }
+
+      result.suggested = suggested;
+      result.accepted = !samePolicyValue("shipping_method", change.current, suggested);
+      result.reject_reason = result.accepted ? "" : "No change from current value.";
+      return result;
+    }
+
+    const current = numericPolicyNumber(change.current);
+    const suggested = numericPolicyNumber(change.suggested);
+
+    if (!Number.isFinite(current) || !Number.isFinite(suggested)) {
+      result.reject_reason = "Current and suggested values must be numeric.";
+      return result;
+    }
+
+    const delta = suggested - current;
+    result.current = current;
+    result.suggested = suggested;
+    result.delta = delta;
+
+    if (delta === 0) {
+      result.reject_reason = "No change from current value.";
+      return result;
+    }
+
+    if (acceptedNumeric >= maxPerRun) {
+      result.reject_reason = `Numeric change limit reached (${maxPerRun} per run).`;
+      return result;
+    }
+
+    const fieldMaxChange = Number(maxChange[change.parameter] ?? 25);
+    if (Math.abs(delta) > fieldMaxChange) {
+      result.reject_reason = `Change ${delta} exceeds per-apply limit +/-${fieldMaxChange}.`;
+      return result;
+    }
+
+    const min = Number(
+      change.parameter === "quantity"
+        ? bounds.quantity_min ?? 0
+        : bounds.order_point_min ?? 0,
+    );
+    const max = Number(
+      change.parameter === "quantity"
+        ? bounds.quantity_max ?? 999999
+        : bounds.order_point_max ?? 999999,
+    );
+
+    if (suggested < min || suggested > max) {
+      result.reject_reason = `Suggested value ${suggested} is outside configured bounds ${min}-${max}.`;
+      return result;
+    }
+
+    if (
+      delta < 0 &&
+      guardrails.block_decrease_when_lost_demand !== false &&
+      Number.isFinite(lostDemand) &&
+      lostDemand > 0
+    ) {
+      result.reject_reason = "Decrease blocked while served lost demand is present.";
+      return result;
+    }
+
+    if (
+      delta < 0 &&
+      guardrails.block_decrease_below_dynamic_cover_min !== false &&
+      Number.isFinite(daysOfCover) &&
+      daysOfCover < coverTargets.min
+    ) {
+      result.reject_reason = "Decrease blocked because served cover is below the dynamic minimum.";
+      return result;
+    }
+
+    if (
+      delta > 0 &&
+      guardrails.block_increase_above_dynamic_cover_max_without_lost_demand !== false &&
+      Number.isFinite(daysOfCover) &&
+      daysOfCover > coverTargets.max &&
+      (!Number.isFinite(lostDemand) || lostDemand <= 0)
+    ) {
+      result.reject_reason = "Increase blocked because served cover is already above the dynamic maximum and no lost demand is present.";
+      return result;
+    }
+
+    const currentShipping = policyAreaCurrentValue(
+      config,
+      context.policySnapshot || [],
+      change.area,
+      "shipping_method",
+    );
+    if (
+      delta > 0 &&
+      guardrails.block_truck_increase_inside_lead_time_window !== false &&
+      strictShippingValue(currentShipping) === "truck" &&
+      Number.isFinite(coverTargets.remainingDays) &&
+      coverTargets.remainingDays <= rules.truck_lead_days
+    ) {
+      result.reject_reason = `Increase blocked because truck lead time is ${rules.truck_lead_days} days and only ${coverTargets.remainingDays} game days remain.`;
+      return result;
+    }
+
+    acceptedNumeric += 1;
+    result.accepted = true;
+    return result;
+  });
+}
+
+function policyPageConfig(config, area) {
+  const pageId = pageIdForPolicyArea(area);
+  const page = (config.crawl.policy_pages || []).find((item) => item.id === pageId);
+
+  if (!page) {
+    throw new Error(`Missing policy page configuration for ${area}`);
+  }
+
+  return page;
+}
+
+async function fetchPolicySnapshotForPage(config, cookieJar, page) {
+  const response = await request(page.url, { method: "GET" }, cookieJar);
+  const html = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`${page.label} policy page failed with HTTP ${response.status}`);
+  }
+
+  return {
+    html,
+    snapshot: parsePolicyPageSnapshot(html, page),
+  };
+}
+
+function formControlsForChanges(snapshot, changes) {
+  const changeControls = new Set(changes.map((change) => change.control));
+  const formIndex = (snapshot.forms || []).find((control) =>
+    changeControls.has(control.name),
+  )?.formIndex;
+
+  if (!formIndex) {
+    throw new Error(`Could not find an editable policy form for ${snapshot.id}`);
+  }
+
+  return (snapshot.forms || []).filter((control) => control.formIndex === formIndex);
+}
+
+function formBodyForPolicyChanges(controls, changes) {
+  const updates = new Map(changes.map((change) => [change.control, String(change.suggested)]));
+  const body = new URLSearchParams();
+
+  for (const control of controls) {
+    const name = control.name;
+
+    if (!name) {
+      continue;
+    }
+
+    const type = String(control.type || "").toLowerCase();
+
+    if ((type === "checkbox" || type === "radio") && control.checked !== "yes") {
+      continue;
+    }
+
+    if (type === "button") {
+      continue;
+    }
+
+    const value = updates.has(name) ? updates.get(name) : control.value || "";
+    body.append(name, value);
+  }
+
+  return body;
+}
+
+async function submitPolicyChangesForArea(config, cookieJar, area, changes) {
+  const page = policyPageConfig(config, area);
+  const before = await fetchPolicySnapshotForPage(config, cookieJar, page);
+  const controls = formControlsForChanges(before.snapshot, changes);
+  const body = formBodyForPolicyChanges(controls, changes);
+  const firstControl = controls[0] || {};
+  const method = String(firstControl.formMethod || "GET").toUpperCase();
+  const actionUrl = new URL(firstControl.formAction || page.url, page.url);
+  let response;
+
+  if (method === "POST") {
+    response = await follow(
+      await request(
+        actionUrl.toString(),
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+          },
+          body,
+        },
+        cookieJar,
+      ),
+      cookieJar,
+    );
+  } else {
+    actionUrl.search = body.toString();
+    response = await follow(
+      await request(actionUrl.toString(), { method: "GET" }, cookieJar),
+      cookieJar,
+    );
+  }
+
+  const html = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`${area} policy submit failed with HTTP ${response.status}`);
+  }
+
+  return {
+    status: response.status,
+    url: response.url,
+    snapshot: parsePolicyPageSnapshot(html, page),
+  };
+}
+
+function verifyAppliedChanges(config, policySnapshot, changes) {
+  return changes.map((change) => {
+    const current = policyAreaCurrentValue(
+      config,
+      policySnapshot,
+      change.area,
+      change.parameter,
+    );
+
+    return {
+      ...change,
+      verified: samePolicyValue(change.parameter, current, change.suggested),
+      verified_value: current,
+    };
+  });
+}
+
 function addSummaryWorksheet(workbook, usedNames, config, record) {
   const worksheet = workbook.addWorksheet(safeWorksheetName("Summary", usedNames));
   const alpha = Number(config.excel?.exponential_smoothing_alpha ?? 0.3);
@@ -3514,6 +4041,41 @@ function buildAdjustmentPlanLines(plan) {
         `change ${item.change || "n/a"}`,
         item.direction,
         item.urgency,
+        item.reason,
+      ].join(" | "),
+    ),
+  ];
+}
+
+function buildPolicyApplyLines(config, plan, policySnapshot = []) {
+  if (config.policy_apply?.enabled === false) {
+    return [];
+  }
+
+  const workflowUrl = policyApplyWorkflowUrl(config);
+  const { changes, conflicts } = candidatePolicyChangesFromPlan(
+    config,
+    plan,
+    policySnapshot,
+    { allowShipping: false },
+  );
+
+  return [
+    "",
+    "Approval-Gated Apply",
+    workflowUrl ? `Workflow: ${workflowUrl}` : "Workflow: not configured",
+    "To apply: open workflow, choose recommended mode, type APPLY in confirm. The workflow re-crawls latest values before submitting.",
+    "Dry run: leave confirm as DRY_RUN or set dry_run=true.",
+    "Guardrails: max +/-25 per numeric field, no priority/capacity changes, no decrease during lost demand or below dynamic cover minimum.",
+    conflicts.length ? `Conflicts: ${conflicts.length} candidate conflict(s), apply workflow will block conflicting fields.` : "Conflicts: none",
+    changes.length ? "Recommended apply fields:" : "Recommended apply fields: none",
+    ...changes.map((item) =>
+      [
+        item.area,
+        item.parameter,
+        `current ${item.current ?? "n/a"}`,
+        `suggested ${item.suggested ?? "n/a"}`,
+        item.direction,
         item.reason,
       ].join(" | "),
     ),
@@ -4553,6 +5115,11 @@ function buildReportText(config, record, standingReport, options = {}) {
     ...((options.recommendations?.items || []).map((item) => `- ${item}`)),
     `Source: ${options.recommendations?.source || "n/a"}`,
     ...buildAdjustmentPlanLines(options.adjustmentPlan),
+    ...buildPolicyApplyLines(
+      config,
+      options.adjustmentPlan,
+      options.policySnapshot || [],
+    ),
     ...buildMetricAlertLines(options.metricAlerts),
     ...buildBacktestLines(options.backtestReport),
     ...buildOperationalLines(options.operationalSnapshot),
@@ -4796,6 +5363,72 @@ function buildAdjustmentPlanHtml(plan) {
   ].join("");
 }
 
+function buildPolicyApplyHtml(config, plan, policySnapshot = []) {
+  if (config.policy_apply?.enabled === false) {
+    return "";
+  }
+
+  const workflowUrl = policyApplyWorkflowUrl(config);
+  const { changes, conflicts } = candidatePolicyChangesFromPlan(
+    config,
+    plan,
+    policySnapshot,
+    { allowShipping: false },
+  );
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Approval-Gated Apply</div>',
+    '<div style="border:1px solid #bbf7d0;border-radius:8px;background:#f0fdf4;padding:12px 14px;margin-bottom:10px;color:#14532d;font-size:13px;line-height:1.45;">',
+    '<strong>Semi-automatic only:</strong> this email does not change the game. The GitHub workflow re-crawls latest data, applies guardrails, and submits only after manual confirmation.',
+    "</div>",
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin-bottom:10px;">',
+    "<tr>",
+    '<td style="font-size:13px;color:#334155;line-height:1.45;">',
+    '<div><strong>Workflow input:</strong> mode=recommended, confirm=APPLY</div>',
+    '<div><strong>Dry run:</strong> confirm=DRY_RUN or dry_run=true</div>',
+    '<div><strong>Guardrails:</strong> max +/-25 per numeric field, no priority/capacity changes, no decrease during lost demand or below dynamic cover minimum.</div>',
+    conflicts.length
+      ? `<div style="color:#b91c1c;font-weight:700;">Conflicts: ${escapeHtml(conflicts.length)} candidate conflict(s); conflicting fields are blocked.</div>`
+      : '<div style="color:#047857;font-weight:700;">Conflicts: none</div>',
+    "</td>",
+    '<td style="text-align:right;vertical-align:top;white-space:nowrap;">',
+    workflowUrl
+      ? `<a href="${escapeHtml(workflowUrl)}" style="display:inline-block;background:#047857;color:#ffffff;text-decoration:none;border-radius:6px;padding:10px 14px;font-size:13px;font-weight:700;">Open Apply Workflow</a>`
+      : "",
+    "</td>",
+    "</tr>",
+    "</table>",
+    changes.length
+      ? [
+          '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #d8dee9;border-radius:8px;overflow:hidden;font-size:13px;">',
+          '<thead><tr style="background:#dcfce7;color:#14532d;">',
+          '<th style="padding:9px;text-align:left;">Area</th>',
+          '<th style="padding:9px;text-align:left;">Field</th>',
+          '<th style="padding:9px;text-align:right;">Current</th>',
+          '<th style="padding:9px;text-align:right;">Suggested</th>',
+          '<th style="padding:9px;text-align:left;">Reason</th>',
+          "</tr></thead>",
+          "<tbody>",
+          ...changes.map((item) =>
+            [
+              "<tr>",
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;font-weight:700;">${escapeHtml(item.area)}</td>`,
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(item.parameter)}</td>`,
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(item.current ?? "n/a")}</td>`,
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:700;">${escapeHtml(item.suggested ?? "n/a")}</td>`,
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(item.reason)}</td>`,
+              "</tr>",
+            ].join(""),
+          ),
+          "</tbody>",
+          "</table>",
+        ].join("")
+      : '<div style="border:1px solid #d8dee9;border-radius:8px;background:#f8fafc;padding:10px 12px;color:#64748b;font-size:13px;">No policy fields are currently eligible for semi-automatic apply.</div>',
+    "</div>",
+  ].join("");
+}
+
 function statusColor(status) {
   if (status === "ALERT") {
     return "#b91c1c";
@@ -4984,6 +5617,11 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     buildWatchlistHtml(options.watchlist),
     buildRecommendationsHtml(options.recommendations),
     buildAdjustmentPlanHtml(options.adjustmentPlan),
+    buildPolicyApplyHtml(
+      config,
+      options.adjustmentPlan,
+      options.policySnapshot || [],
+    ),
     buildMetricAlertsHtml(options.metricAlerts),
     buildBacktestHtml(options.backtestReport),
     !isWarning ? buildOperationalSnapshotHtml(options.operationalSnapshot) : "",
@@ -5178,7 +5816,7 @@ async function sendReportEmail(config, record, standingReport, options = {}) {
   return true;
 }
 
-async function crawl(config, options = {}) {
+async function loginToGame(config) {
   const teamId = requiredEnv(config.credentials.team_id_env);
   const password = requiredEnv(config.credentials.password_env);
   const institution = optionalEnv(
@@ -5217,6 +5855,17 @@ async function crawl(config, options = {}) {
   }
 
   const dashboard = extractDashboardValues(dashboardHtml);
+
+  return {
+    cookieJar,
+    dashboard,
+    dashboardHtml,
+  };
+}
+
+async function crawl(config, options = {}) {
+  const session = await loginToGame(config);
+  const { cookieJar, dashboard } = session;
   const inventoryResponse = await request(
     config.crawl.warehouse_inventory_url,
     { method: "GET" },
@@ -5282,6 +5931,7 @@ async function crawl(config, options = {}) {
     plotSnapshots,
     policySnapshot,
     standingReport,
+    cookieJar: options.returnCookieJar ? cookieJar : undefined,
   };
 }
 
@@ -5660,6 +6310,193 @@ async function runBacktestOnly(config) {
   console.log(`Backtest workbook: ${outputs.workbookPath || "not written"}`);
 }
 
+async function runPolicyApply(config) {
+  ensureDir(path.resolve(process.cwd(), config.output.state_dir));
+  const mode = optionalEnv("POLICY_APPLY_MODE", "recommended").toLowerCase();
+  const confirm = optionalEnv("POLICY_APPLY_CONFIRM", "DRY_RUN").trim();
+  const dryRun = isTruthyEnv("POLICY_APPLY_DRY_RUN") || confirm !== "APPLY";
+  const allowShipping =
+    isTruthyEnv("POLICY_ALLOW_SHIPPING_METHOD_CHANGE") &&
+    config.policy_apply?.allow_shipping_method_change === true;
+  const checkedAt = new Date().toISOString();
+  const {
+    dashboard,
+    inventoryTable,
+    plotSnapshots,
+    standingReport,
+    policySnapshot,
+    cookieJar,
+  } = await crawl(config, { returnCookieJar: true });
+  const record = createRecord(config, dashboard, inventoryTable, standingReport, {
+    checkedAt,
+  });
+  const operationalSnapshot = buildOperationalSnapshot(plotSnapshots, {});
+  const metricCatalog = buildMetricCatalog(
+    config,
+    record,
+    standingReport,
+    operationalSnapshot,
+    { policySnapshot },
+  );
+  const adjustmentPlan = buildAutoAdjustmentPlan(
+    config,
+    metricCatalog,
+    record,
+    standingReport,
+    policySnapshot,
+  );
+  const candidateSet =
+    mode === "custom"
+      ? customPolicyChangesFromEnv(config, policySnapshot)
+      : candidatePolicyChangesFromPlan(config, adjustmentPlan, policySnapshot, {
+          allowShipping,
+        });
+  const validated = validatePolicyChanges(config, candidateSet.changes, {
+    record,
+    metricCatalog,
+    policySnapshot,
+    allowShipping,
+  });
+  const accepted = validated.filter((change) => change.accepted);
+  const report = {
+    generated_at: checkedAt,
+    generated_at_local: localizedTime(checkedAt, config.crawl.timezone),
+    mode,
+    dry_run: dryRun,
+    confirm,
+    workflow_url: policyApplyWorkflowUrl(config),
+    target_team: record.targetTeam,
+    target_rank: record.targetRank,
+    target_cash: record.targetCash,
+    dashboard_day: record.dashboardDay,
+    warehouse_inventory: record.warehouseInventory,
+    warehouse_inventory_day: record.warehouseDay,
+    posture: adjustmentPlan.posture || "n/a",
+    safety: {
+      approval_required: true,
+      game_updates_enabled: !dryRun,
+      allow_shipping_method_change: allowShipping,
+      note: dryRun
+        ? "Dry run only; no game forms were submitted."
+        : "Manual approval received; accepted fields were submitted after latest crawl and guardrail checks.",
+    },
+    conflicts: candidateSet.conflicts,
+    changes: validated,
+  };
+
+  if (candidateSet.conflicts.length > 0) {
+    report.safety.game_updates_enabled = false;
+    report.safety.note = "Conflicting recommendations detected; no game forms were submitted.";
+  } else if (!dryRun && accepted.length > 0) {
+    const byArea = new Map();
+
+    for (const change of accepted) {
+      if (!byArea.has(change.area)) {
+        byArea.set(change.area, []);
+      }
+      byArea.get(change.area).push(change);
+    }
+
+    for (const [area, changes] of byArea.entries()) {
+      await submitPolicyChangesForArea(config, cookieJar, area, changes);
+      for (const change of changes) {
+        change.applied = true;
+      }
+    }
+
+    const afterPolicySnapshot = [...policySnapshot];
+    for (const area of byArea.keys()) {
+      const page = policyPageConfig(config, area);
+      const after = await fetchPolicySnapshotForPage(config, cookieJar, page);
+      const index = afterPolicySnapshot.findIndex((item) => item.id === page.id);
+
+      if (index >= 0) {
+        afterPolicySnapshot[index] = after.snapshot;
+      } else {
+        afterPolicySnapshot.push(after.snapshot);
+      }
+    }
+
+    const verified = verifyAppliedChanges(config, afterPolicySnapshot, accepted);
+    for (const verifiedChange of verified) {
+      const target = report.changes.find(
+        (change) =>
+          change.area === verifiedChange.area &&
+          change.parameter === verifiedChange.parameter,
+      );
+      if (target) {
+        target.verified = verifiedChange.verified;
+        target.verified_value = verifiedChange.verified_value;
+      }
+    }
+  }
+
+  const outputs = writePolicyApplyOutputs(config, report);
+  const failedVerification = report.changes.filter(
+    (change) => change.applied && !change.verified,
+  );
+  const policySnapshotCsvPath = path.resolve(
+    process.cwd(),
+    config.output.policy_snapshot_csv ||
+      ".monitor-state/policy_snapshot_latest.csv",
+  );
+  const adjustmentPlanJsonPath = path.resolve(
+    process.cwd(),
+    config.output.adjustment_plan_json ||
+      ".monitor-state/adjustment_plan_latest.json",
+  );
+  const adjustmentPlanCsvPath = path.resolve(
+    process.cwd(),
+    config.output.adjustment_plan_csv ||
+      ".monitor-state/adjustment_plan_latest.csv",
+  );
+  fs.writeFileSync(
+    policySnapshotCsvPath,
+    buildPolicySnapshotCsv(policySnapshot),
+    "utf8",
+  );
+  fs.writeFileSync(
+    adjustmentPlanJsonPath,
+    `${JSON.stringify(adjustmentPlan, null, 2)}\n`,
+    "utf8",
+  );
+  fs.writeFileSync(
+    adjustmentPlanCsvPath,
+    buildAdjustmentPlanCsv(adjustmentPlan),
+    "utf8",
+  );
+
+  console.log("Policy apply summary:");
+  console.log(`Mode: ${mode}`);
+  console.log(`Dry run: ${dryRun ? "yes" : "no"}`);
+  console.log(`Target team: ${record.targetTeam}`);
+  console.log(`Target cash: ${record.targetCash}`);
+  console.log(`Dashboard day: ${record.dashboardDay}`);
+  console.log(`Posture: ${report.posture}`);
+  console.log(`Candidate changes: ${candidateSet.changes.length}`);
+  console.log(`Accepted changes: ${accepted.length}`);
+  console.log(`Conflicts: ${candidateSet.conflicts.length}`);
+  for (const change of report.changes) {
+    console.log(
+      `${change.accepted ? "ACCEPT" : "BLOCK"} ${change.area}.${change.parameter}: ${change.current ?? "n/a"} -> ${change.suggested ?? "n/a"}${change.reject_reason ? ` (${change.reject_reason})` : ""}`,
+    );
+  }
+  console.log(`Policy apply JSON: ${outputs.jsonPath}`);
+  console.log(`Policy apply CSV: ${outputs.csvPath}`);
+
+  if (candidateSet.conflicts.length > 0 && !dryRun) {
+    throw new Error("Policy apply blocked because recommendation conflicts were detected.");
+  }
+
+  if (failedVerification.length > 0) {
+    throw new Error(
+      `Policy apply submitted but verification failed for: ${failedVerification
+        .map((item) => `${item.area}.${item.parameter}`)
+        .join(", ")}`,
+    );
+  }
+}
+
 async function main() {
   const config = readJson(CONFIG_PATH);
 
@@ -5684,6 +6521,11 @@ async function main() {
 
   if (process.argv.includes("--backtest")) {
     await runBacktestOnly(config);
+    return;
+  }
+
+  if (process.argv.includes("--apply-policy")) {
+    await runPolicyApply(config);
     return;
   }
 

@@ -1,0 +1,117 @@
+name: Apply Recommended Policy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type APPLY to submit accepted changes. Any other value performs a dry run only."
+        required: true
+        default: "DRY_RUN"
+      apply_mode:
+        description: "Use latest recommendations or manual custom inputs."
+        required: true
+        type: choice
+        options:
+          - recommended
+          - custom
+        default: recommended
+      dry_run:
+        description: "Force validation only without submitting game forms."
+        required: true
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
+  push:
+    branches:
+      - main
+      factory_order_point:
+        description: "Custom mode only. Blank keeps current."
+        required: false
+        default: ""
+      factory_quantity:
+        description: "Custom mode only. Blank keeps current."
+        required: false
+        default: ""
+      factory_shipping_method:
+        description: "Custom mode only. Blank keeps current. Shipping changes are blocked unless enabled in config."
+        required: false
+        default: ""
+      warehouse_order_point:
+        description: "Custom mode only. Blank keeps current."
+        required: false
+        default: ""
+      warehouse_quantity:
+        description: "Custom mode only. Blank keeps current."
+        required: false
+        default: ""
+      warehouse_shipping_method:
+        description: "Custom mode only. Blank keeps current. Shipping changes are blocked unless enabled in config."
+        required: false
+        default: ""
+      allow_shipping_method_change:
+        description: "Extra confirmation for shipping method changes; config must also allow it."
+        required: true
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-policy-apply
+  cancel-in-progress: false
+
+jobs:
+  apply-policy:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[apply-dry-run]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate and apply approved policy changes
+        run: npm run apply-policy
+        env:
+          SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
+          SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
+          SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
+          POLICY_APPLY_CONFIRM: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm || 'DRY_RUN' }}
+          POLICY_APPLY_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_mode || 'recommended' }}
+          POLICY_APPLY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
+          POLICY_FACTORY_ORDER_POINT: ${{ github.event_name == 'workflow_dispatch' && inputs.factory_order_point || '' }}
+          POLICY_FACTORY_QUANTITY: ${{ github.event_name == 'workflow_dispatch' && inputs.factory_quantity || '' }}
+          POLICY_FACTORY_SHIPPING_METHOD: ${{ github.event_name == 'workflow_dispatch' && inputs.factory_shipping_method || '' }}
+          POLICY_WAREHOUSE_ORDER_POINT: ${{ github.event_name == 'workflow_dispatch' && inputs.warehouse_order_point || '' }}
+          POLICY_WAREHOUSE_QUANTITY: ${{ github.event_name == 'workflow_dispatch' && inputs.warehouse_quantity || '' }}
+          POLICY_WAREHOUSE_SHIPPING_METHOD: ${{ github.event_name == 'workflow_dispatch' && inputs.warehouse_shipping_method || '' }}
+          POLICY_ALLOW_SHIPPING_METHOD_CHANGE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_shipping_method_change || 'false' }}
+
+      - name: Upload apply output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-apply-output
+          path: |
+            .monitor-state/policy_apply_latest.json
+            .monitor-state/policy_apply_latest.csv
+            .monitor-state/adjustment_plan_latest.json
+            .monitor-state/adjustment_plan_latest.csv
+            .monitor-state/policy_snapshot_latest.csv
+          if-no-files-found: ignore
+          include-hidden-files: true

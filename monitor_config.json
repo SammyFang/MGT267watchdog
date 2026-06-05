@@ -300,6 +300,25 @@
       }
     }
   },
+  "policy_apply": {
+    "enabled": true,
+    "mode": "approval_required",
+    "workflow_url": "https://github.com/SammyFang/MGT267watchdog/actions/workflows/apply-policy.yml",
+    "allow_shipping_method_change": false,
+    "max_numeric_changes_per_run": 4,
+    "max_change_per_apply": {
+      "order_point": 25,
+      "quantity": 25
+    },
+    "guardrails": {
+      "block_priority_changes": true,
+      "block_capacity_changes": true,
+      "block_decrease_when_lost_demand": true,
+      "block_decrease_below_dynamic_cover_min": true,
+      "block_increase_above_dynamic_cover_max_without_lost_demand": true,
+      "block_truck_increase_inside_lead_time_window": true
+    }
+  },
   "backtest": {
     "enabled": true,
     "data_source": "current trigger crawl plot data",
@@ -337,6 +356,8 @@
     "policy_snapshot_csv": ".monitor-state/policy_snapshot_latest.csv",
     "adjustment_plan_json": ".monitor-state/adjustment_plan_latest.json",
     "adjustment_plan_csv": ".monitor-state/adjustment_plan_latest.csv",
+    "policy_apply_json": ".monitor-state/policy_apply_latest.json",
+    "policy_apply_csv": ".monitor-state/policy_apply_latest.csv",
     "backtest_json": ".monitor-state/backtest_latest.json",
     "backtest_summary_csv": ".monitor-state/backtest_summary_latest.csv",
     "backtest_daily_csv": ".monitor-state/backtest_daily_latest.csv",

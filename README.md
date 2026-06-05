@@ -16,7 +16,8 @@ Most settings are in `monitor_config.json`:
 - `monitor.metric_thresholds`: optional min/max alert thresholds for the hourly report's warehouse, factory, and headquarters metrics.
 - `game_rules`: Supply Chain Game economics used by Action Notes, including day `1460` obsolescence, 24-hour order loss, transport costs, capacity lead time, and the no-effect priority rule.
 - `ai.enabled`, `ai.model`, `ai.api_key_env`: Gemini recommendation settings.
-- `auto_adjust`: research-only adjustment planner settings. It writes suggested policy changes to email, JSON/CSV, and Excel, but never submits game forms.
+- `auto_adjust`: research-only adjustment planner settings. It writes suggested policy changes to email, JSON/CSV, and Excel.
+- `policy_apply`: approval-gated semi-automatic apply settings. The email links to a manual GitHub workflow; game forms are submitted only after typing `APPLY`.
 - `backtest`: per-trigger backtest settings. It uses the plot data crawled during the current GitHub Actions run and has no local file dependency.
 - `email.recipients`: notification recipient list.
 - `email.game_entry_url`: clickable Supply Chain Game entry link included in every email.
@@ -47,6 +48,9 @@ repository_dispatch: watchdog-heartbeat
 
 # .github/workflows/manual-export.yml
 workflow_dispatch only
+
+# .github/workflows/apply-policy.yml
+workflow_dispatch only
 ```
 
 GitHub requires cron schedules to live in workflow files, so edit those lines if the cloud schedule needs to change.
@@ -67,6 +71,49 @@ To download the latest full crawler workbook without sending email or changing t
 5. Download the `latest-crawl-data` artifact.
 
 The artifact includes `supply_chain_data_latest.xlsx` plus the latest JSON/CSV outputs, including `policy_snapshot_latest.csv`, the research-only `adjustment_plan_latest` files, and the per-trigger `backtest_latest` outputs. This workflow does not restore or save the scheduled monitor cache.
+
+## Semi-Automatic Apply
+
+Hourly emails include an `Approval-Gated Apply` section with a button to open `Apply Recommended Policy`.
+
+The apply workflow always re-crawls the latest game data before doing anything. It does not trust stale email values.
+
+To apply the current recommendation:
+
+1. Open GitHub `Actions`.
+2. Select `Apply Recommended Policy`.
+3. Click `Run workflow`.
+4. Use `apply_mode=recommended`.
+5. Type `APPLY` in `confirm`.
+
+Any other confirmation value runs validation only. You can force validation by setting `dry_run=true`.
+Push with `[apply-dry-run]` runs the same workflow in validation-only mode for deployment checks; it cannot submit game forms.
+
+Guardrails:
+
+- No priority-level changes.
+- No capacity changes.
+- No direct public email link that can modify the game without GitHub authentication.
+- At most 4 numeric fields per run.
+- `order_point` and `quantity` change by at most `policy_apply.max_change_per_apply`, currently `25`.
+- Decreases are blocked when served lost demand is present or served cover is below the dynamic minimum.
+- Increases are blocked when served cover is already above the dynamic maximum and no lost demand is present.
+- Shipping method changes are blocked unless both `policy_apply.allow_shipping_method_change=true` and the workflow input `allow_shipping_method_change=true`.
+
+Custom mode can set these fields manually, with the same guardrails:
+
+- `factory_order_point`
+- `factory_quantity`
+- `factory_shipping_method`
+- `warehouse_order_point`
+- `warehouse_quantity`
+- `warehouse_shipping_method`
+
+Outputs:
+
+- JSON: `.monitor-state/policy_apply_latest.json`
+- CSV: `.monitor-state/policy_apply_latest.csv`
+- GitHub artifact: `policy-apply-output`
 
 ## Standing Gap Formula
 
@@ -173,7 +220,9 @@ Available metric keys:
 
 ## Auto-Adjustment Research Plan
 
-`auto_adjust` is intentionally research-only. The code does not submit Factory or Warehouse forms, does not POST policy changes, and does not contain an apply mode. It uses scraped current policy values as the baseline when available, then falls back to `auto_adjust.policy_baseline`.
+`auto_adjust` is the planner. It uses scraped current policy values as the baseline when available, then falls back to `auto_adjust.policy_baseline`. It does not submit forms from scheduled emails or monitors.
+
+`policy_apply` is the separate approval-gated submitter. It is available only through the manual GitHub workflow described above.
 
 Editable fields:
 
@@ -277,6 +326,8 @@ Output files are written to `.monitor-state/`:
 - `policy_snapshot_latest.csv`
 - `adjustment_plan_latest.json`
 - `adjustment_plan_latest.csv`
+- `policy_apply_latest.json`
+- `policy_apply_latest.csv`
 - `backtest_latest.json`
 - `backtest_summary_latest.csv`
 - `backtest_daily_latest.csv`
