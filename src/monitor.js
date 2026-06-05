@@ -2896,7 +2896,21 @@ function candidatePolicyChangesFromPlan(config, plan, policySnapshot, options = 
   };
 }
 
-function customPolicyChangesFromEnv(config, policySnapshot) {
+function policyWorkflowInputName(area, parameter) {
+  const areaPrefix = String(area || "").toLowerCase();
+  const field =
+    parameter === "order_point"
+      ? "order_point"
+      : parameter === "quantity"
+        ? "quantity"
+        : parameter === "shipping_method"
+          ? "shipping_method"
+          : "";
+
+  return areaPrefix && field ? `${areaPrefix}_${field}` : "";
+}
+
+function customPolicyChangesFromEnv(config, policySnapshot, baseSet = {}) {
   const specs = [
     ["POLICY_FACTORY_ORDER_POINT", "factory", "order_point"],
     ["POLICY_FACTORY_QUANTITY", "factory", "quantity"],
@@ -2905,7 +2919,15 @@ function customPolicyChangesFromEnv(config, policySnapshot) {
     ["POLICY_WAREHOUSE_QUANTITY", "warehouse", "quantity"],
     ["POLICY_WAREHOUSE_SHIPPING_METHOD", "warehouse", "shipping_method"],
   ];
-  const changes = [];
+  const changesByKey = new Map();
+  const overriddenKeys = new Set();
+
+  for (const change of baseSet.changes || []) {
+    changesByKey.set(`${change.area}.${change.parameter}`, {
+      ...change,
+      source: change.source || "latest recommendation",
+    });
+  }
 
   for (const [envName, area, parameter] of specs) {
     const raw = optionalEnv(envName, "").trim();
@@ -2917,8 +2939,11 @@ function customPolicyChangesFromEnv(config, policySnapshot) {
     const suggested =
       parameter === "shipping_method" ? strictShippingValue(raw) : numericPolicyNumber(raw);
     const current = policyAreaCurrentValue(config, policySnapshot, area, parameter);
+    const key = `${area}.${parameter}`;
+    const existing = changesByKey.get(key);
+    overriddenKeys.add(key);
 
-    changes.push({
+    changesByKey.set(key, {
       area,
       parameter,
       control: controlNameForPolicyParameter(parameter),
@@ -2934,14 +2959,18 @@ function customPolicyChangesFromEnv(config, policySnapshot) {
               : "hold",
       urgency: "manual",
       confidence: "manual",
-      reason: `Manual workflow input ${envName}.`,
-      source: "workflow input",
+      reason: existing
+        ? `Manual workflow input ${envName}; overrides latest suggested value ${existing.suggested}.`
+        : `Manual workflow input ${envName}.`,
+      source: existing ? "workflow override over latest recommendation" : "workflow input",
     });
   }
 
   return {
-    changes,
-    conflicts: [],
+    changes: [...changesByKey.values()],
+    conflicts: (baseSet.conflicts || []).filter(
+      (conflict) => !overriddenKeys.has(`${conflict.area}.${conflict.parameter}`),
+    ),
   };
 }
 
@@ -4064,7 +4093,8 @@ function buildPolicyApplyLines(config, plan, policySnapshot = []) {
     "",
     "Approval-Gated Apply",
     workflowUrl ? `Workflow: ${workflowUrl}` : "Workflow: not configured",
-    "To apply: open workflow, choose recommended mode, type APPLY in confirm. The workflow re-crawls latest values before submitting.",
+    "To apply: open workflow, choose recommended mode, type APPLY in confirm. The workflow re-crawls latest values and uses the latest safe recommended values before submitting.",
+    "Optional edits: choose custom mode and fill only fields you want to override; blank custom fields still use the latest recommendation.",
     "Dry run: leave confirm as DRY_RUN or set dry_run=true.",
     "Guardrails: max +/-25 per numeric field, no priority/capacity changes, no decrease during lost demand or below dynamic cover minimum.",
     conflicts.length ? `Conflicts: ${conflicts.length} candidate conflict(s), apply workflow will block conflicting fields.` : "Conflicts: none",
@@ -4073,6 +4103,7 @@ function buildPolicyApplyLines(config, plan, policySnapshot = []) {
       [
         item.area,
         item.parameter,
+        `override box ${policyWorkflowInputName(item.area, item.parameter) || "n/a"}`,
         `current ${item.current ?? "n/a"}`,
         `suggested ${item.suggested ?? "n/a"}`,
         item.direction,
@@ -5385,7 +5416,8 @@ function buildPolicyApplyHtml(config, plan, policySnapshot = []) {
     '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin-bottom:10px;">',
     "<tr>",
     '<td style="font-size:13px;color:#334155;line-height:1.45;">',
-    '<div><strong>Workflow input:</strong> mode=recommended, confirm=APPLY</div>',
+    '<div><strong>One-click default:</strong> mode=recommended, confirm=APPLY. The workflow fills the latest safe recommended values at runtime.</div>',
+    '<div><strong>Optional edits:</strong> choose mode=custom and fill only fields you want to override; blank fields still use the latest recommendation.</div>',
     '<div><strong>Dry run:</strong> confirm=DRY_RUN or dry_run=true</div>',
     '<div><strong>Guardrails:</strong> max +/-25 per numeric field, no priority/capacity changes, no decrease during lost demand or below dynamic cover minimum.</div>',
     conflicts.length
@@ -5405,6 +5437,7 @@ function buildPolicyApplyHtml(config, plan, policySnapshot = []) {
           '<thead><tr style="background:#dcfce7;color:#14532d;">',
           '<th style="padding:9px;text-align:left;">Area</th>',
           '<th style="padding:9px;text-align:left;">Field</th>',
+          '<th style="padding:9px;text-align:left;">Override Box</th>',
           '<th style="padding:9px;text-align:right;">Current</th>',
           '<th style="padding:9px;text-align:right;">Suggested</th>',
           '<th style="padding:9px;text-align:left;">Reason</th>',
@@ -5415,6 +5448,7 @@ function buildPolicyApplyHtml(config, plan, policySnapshot = []) {
               "<tr>",
               `<td style="padding:8px;border-bottom:1px solid #e2e8f0;font-weight:700;">${escapeHtml(item.area)}</td>`,
               `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(item.parameter)}</td>`,
+              `<td style="padding:8px;border-bottom:1px solid #e2e8f0;font-family:Consolas,monospace;font-size:12px;">${escapeHtml(policyWorkflowInputName(item.area, item.parameter) || "n/a")}</td>`,
               `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;">${escapeHtml(item.current ?? "n/a")}</td>`,
               `<td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:700;">${escapeHtml(item.suggested ?? "n/a")}</td>`,
               `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(item.reason)}</td>`,
@@ -6345,12 +6379,16 @@ async function runPolicyApply(config) {
     standingReport,
     policySnapshot,
   );
+  const recommendedSet = candidatePolicyChangesFromPlan(
+    config,
+    adjustmentPlan,
+    policySnapshot,
+    { allowShipping },
+  );
   const candidateSet =
     mode === "custom"
-      ? customPolicyChangesFromEnv(config, policySnapshot)
-      : candidatePolicyChangesFromPlan(config, adjustmentPlan, policySnapshot, {
-          allowShipping,
-        });
+      ? customPolicyChangesFromEnv(config, policySnapshot, recommendedSet)
+      : recommendedSet;
   const validated = validatePolicyChanges(config, candidateSet.changes, {
     record,
     metricCatalog,

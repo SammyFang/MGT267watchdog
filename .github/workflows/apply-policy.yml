@@ -8,7 +8,7 @@ on:
         required: true
         default: "DRY_RUN"
       apply_mode:
-        description: "Use latest recommendations or manual custom inputs."
+        description: "recommended uses latest safe values. custom starts from latest safe values and applies optional overrides below."
         required: true
         type: choice
         options:
@@ -24,27 +24,27 @@ on:
           - "true"
         default: "false"
       factory_order_point:
-        description: "Custom mode only. Blank keeps current."
+        description: "Optional custom override. Blank uses the latest recommended value."
         required: false
         default: ""
       factory_quantity:
-        description: "Custom mode only. Blank keeps current."
+        description: "Optional custom override. Blank uses the latest recommended value."
         required: false
         default: ""
       factory_shipping_method:
-        description: "Custom mode only. Blank keeps current. Shipping changes are blocked unless enabled in config."
+        description: "Optional custom override. Blank uses latest recommendation; shipping changes are blocked unless enabled in config."
         required: false
         default: ""
       warehouse_order_point:
-        description: "Custom mode only. Blank keeps current."
+        description: "Optional custom override. Blank uses the latest recommended value."
         required: false
         default: ""
       warehouse_quantity:
-        description: "Custom mode only. Blank keeps current."
+        description: "Optional custom override. Blank uses the latest recommended value."
         required: false
         default: ""
       warehouse_shipping_method:
-        description: "Custom mode only. Blank keeps current. Shipping changes are blocked unless enabled in config."
+        description: "Optional custom override. Blank uses latest recommendation; shipping changes are blocked unless enabled in config."
         required: false
         default: ""
       allow_shipping_method_change:
