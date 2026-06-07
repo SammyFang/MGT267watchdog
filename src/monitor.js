@@ -4205,12 +4205,26 @@ async function publishGithubIssueStatus(config, markdown) {
     "This issue is automatically updated by GitHub Actions. SMTP email can remain disabled while monitoring continues.",
   ].join("\n");
   const issues = await githubApi(config, "GET", "/issues?state=open&per_page=100");
-  const existing = (issues || []).find(
+  const exactMatches = (issues || []).filter(
     (issue) => !issue.pull_request && issue.title === title,
   );
+  exactMatches.sort((left, right) => {
+    const rightTime = new Date(right.updated_at || right.created_at || 0).getTime();
+    const leftTime = new Date(left.updated_at || left.created_at || 0).getTime();
+    return rightTime - leftTime || right.number - left.number;
+  });
+  const existing = exactMatches[0];
 
   if (existing) {
     await githubApi(config, "PATCH", `/issues/${existing.number}`, { body });
+    for (const duplicate of exactMatches.slice(1)) {
+      await githubApi(config, "PATCH", `/issues/${duplicate.number}`, {
+        state: "closed",
+        state_reason: "not_planned",
+        body: `${body}\n\nDuplicate live status issue closed automatically; current issue is #${existing.number}.`,
+      });
+      console.log(`Duplicate GitHub live status issue closed: #${duplicate.number}`);
+    }
     console.log(`GitHub live status issue updated: #${existing.number}`);
     return true;
   }
