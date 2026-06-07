@@ -4769,12 +4769,6 @@ function shouldSendWecom(config, options = {}) {
 
 function buildWecomMarkdown(config, record, standingReport, options = {}) {
   const alerts = options.metricAlerts || [];
-  const alertLine = alerts.length
-    ? alerts.map((alert) => `> ${alert.severity || "alert"} ${alert.label}: ${alert.currentRaw || alert.current || "n/a"} ${alert.operator || ""} ${alert.thresholdRaw || ""}`).join("\n")
-    : "> No active alerts";
-  const recommendations = (options.adjustmentPlan?.recommendations || [])
-    .slice(0, 4)
-    .map((item) => `- ${item.area}.${item.parameter}: ${item.baseline || "n/a"} -> ${item.suggested || "n/a"} (${item.direction || "n/a"})`);
   const review = options.dayChangeReview || {};
   const pageUrl = statusPageUrl();
   const issueUrl = options.githubIssueUrl || "";
@@ -4782,34 +4776,58 @@ function buildWecomMarkdown(config, record, standingReport, options = {}) {
   const gameUrl = config.email?.game_entry_url || config.crawl.entry_url;
   const latest = review.latest || {};
   const backtest = review.backtest || {};
+  const links = [
+    gameUrl ? `[Game](${gameUrl})` : "",
+    issueUrl ? `[Issue](${issueUrl})` : "",
+    runUrl ? `[Run](${runUrl})` : "",
+    pageUrl ? `[Status](${pageUrl})` : "",
+  ].filter(Boolean).join(" | ");
+  const alertLines = alerts.length
+    ? alerts.slice(0, 3).map((alert) =>
+        `> <font color="warning">${alert.severity || "alert"}</font> ${alert.label}: ${alert.currentRaw || alert.current || "n/a"} ${alert.operator || ""} ${alert.thresholdRaw || ""}`.trim(),
+      )
+    : ["> <font color=\"info\">OK</font> No active alerts"];
+  const decisions = (options.adjustmentPlan?.recommendations || [])
+    .filter((item) => {
+      const direction = String(item.direction || "").toLowerCase();
+      const baseline = String(item.baseline ?? "");
+      const suggested = String(item.suggested ?? "");
+
+      return !["hold", "review"].includes(direction) && baseline !== suggested;
+    })
+    .slice(0, 3)
+    .map((item, index) =>
+      `${index + 1}. ${item.area}.${item.parameter}: ${item.baseline || "n/a"} -> ${item.suggested || "n/a"} (${item.direction || "n/a"})`,
+    );
+  const backtestLine = backtest.recommendations?.length
+    ? backtest.recommendations.slice(0, 1).join("; ")
+    : `window ${backtest.window || "n/a"}; n=${backtest.observations ?? "n/a"}`;
+  const posture = String(review.posture || "n/a").replace(/_/g, " ");
+  const phase = String(review.phase || "n/a").replace(/_/g, " ");
 
   return truncateText(
     [
-      `**MGT267 Watchdog ${options.kind === "warning" ? "sim-day monitor" : "hourly report"}**`,
-      `Team ${record.targetTeam || "n/a"} rank ${record.targetRank ?? "n/a"} cash ${record.targetCash || "n/a"} day ${record.dashboardDay || "n/a"}`,
-      `Remaining: ${review.remaining_days ?? "n/a"} day(s); phase: ${review.phase || "n/a"}; posture: ${review.posture || "n/a"}`,
-      review.enabled
-        ? `Sim day: ${review.changed ? "changed" : "unchanged"} ${review.previous_day ?? "n/a"} -> ${review.current_day ?? "n/a"}`
-        : "",
+      `**MGT267 Watchdog**`,
+      links,
       "",
-      `Monitor: inventory ${latest.warehouse_inventory ?? record.warehouseInventory ?? "n/a"}, demand ${latest.demand ?? "n/a"}, shipments ${latest.shipments ?? "n/a"}, lost demand ${latest.lost_demand ?? "n/a"}, cover ${latest.days_of_cover ?? "n/a"}`,
-      `Cash gap: nearest ${latest.cash_lead_percent_vs_nearest ?? "n/a"}; rank ${record.targetRank ?? "n/a"}`,
+      `**Snapshot**`,
+      `> Team ${record.targetTeam || "n/a"} | Rank ${record.targetRank ?? "n/a"} | Day ${record.dashboardDay || "n/a"}`,
+      `> Cash ${record.targetCash || "n/a"} | Gap ${latest.cash_lead_percent_vs_nearest ?? "n/a"}`,
+      `> Inventory ${latest.warehouse_inventory ?? record.warehouseInventory ?? "n/a"} | Cover ${latest.days_of_cover ?? "n/a"} | Lost ${latest.lost_demand ?? "n/a"}`,
+      `> Demand ${latest.demand ?? "n/a"} | Shipments ${latest.shipments ?? "n/a"} | Remaining ${review.remaining_days ?? "n/a"}`,
+      `> Phase ${phase} | Posture ${posture}`,
       "",
-      alertLine,
+      `**Alerts**`,
+      ...alertLines,
       "",
-      recommendations.length
-        ? ["Decision candidates:", ...recommendations].join("\n")
-        : "Decision candidates: none; hold unless alerts worsen.",
-      backtest.recommendations?.length
-        ? `Backtest: ${backtest.recommendations.slice(0, 2).join("; ")}`
-        : `Backtest: ${backtest.window || "n/a"}; observations ${backtest.observations ?? "n/a"}`,
+      `**Decision**`,
+      decisions.length
+        ? decisions.join("\n")
+        : "No parameter change recommended now. Hold unless alerts worsen.",
       "",
-      gameUrl ? `Game: ${gameUrl}` : "",
-      pageUrl ? `\nStatus page: ${pageUrl}` : "",
-      issueUrl ? `Live issue: ${issueUrl}` : "",
-      runUrl ? `Run: ${runUrl}` : "",
+      `Backtest: ${backtestLine}`,
     ].filter(Boolean).join("\n"),
-    3500,
+    1800,
   );
 }
 
