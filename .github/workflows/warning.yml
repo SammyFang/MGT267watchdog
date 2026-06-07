@@ -11,6 +11,8 @@ on:
 permissions:
   contents: read
   issues: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: supply-chain-warning
@@ -21,6 +23,9 @@ jobs:
     if: github.event_name != 'push' || contains(github.event.head_commit.message, '[warning-now]')
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Check out repository
@@ -51,6 +56,10 @@ jobs:
           EMAIL_ENABLED: ${{ vars.EMAIL_ENABLED || 'false' }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_ISSUE_NOTIFICATIONS: "true"
+          STATUS_PAGE_URL: ${{ vars.STATUS_PAGE_URL || 'https://sammyfang.github.io/MGT267watchdog/' }}
+          WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
+          WECOM_ENABLED: ${{ vars.WECOM_ENABLED || 'false' }}
+          WECOM_NOTIFY_MODE: ${{ vars.WECOM_NOTIFY_MODE || 'alerts' }}
 
       - name: Upload warning output
         if: always()
@@ -60,3 +69,18 @@ jobs:
           path: .monitor-state
           if-no-files-found: ignore
           include-hidden-files: true
+
+      - name: Configure GitHub Pages
+        if: always()
+        uses: actions/configure-pages@v5
+
+      - name: Upload status page
+        if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .monitor-state/status-site
+
+      - name: Deploy status page
+        id: deployment
+        if: always()
+        uses: actions/deploy-pages@v4

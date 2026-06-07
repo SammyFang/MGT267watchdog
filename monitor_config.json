@@ -350,6 +350,11 @@
     "github_issue": {
       "enabled": true,
       "title": "MGT267 Watchdog Live Status"
+    },
+    "wecom": {
+      "enabled": true,
+      "webhook_url_env": "WECOM_WEBHOOK_URL",
+      "notify_mode": "alerts"
     }
   },
   "output": {
@@ -369,7 +374,8 @@
     "backtest_daily_csv": ".monitor-state/backtest_daily_latest.csv",
     "backtest_xlsx": ".monitor-state/backtest_report_latest.xlsx",
     "data_workbook_xlsx": ".monitor-state/supply_chain_data_latest.xlsx",
-    "email_delivery_json": ".monitor-state/email_delivery_latest.json"
+    "email_delivery_json": ".monitor-state/email_delivery_latest.json",
+    "status_site_dir": ".monitor-state/status-site"
   },
   "excel": {
     "exponential_smoothing_alpha": 0.3

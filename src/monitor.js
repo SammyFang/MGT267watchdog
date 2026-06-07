@@ -4076,6 +4076,29 @@ function actionsRunUrl() {
   return repository && runId ? `${serverUrl}/${repository}/actions/runs/${runId}` : "";
 }
 
+function githubRepositoryUrl() {
+  const serverUrl = optionalEnv("GITHUB_SERVER_URL", "https://github.com");
+  const repository = optionalEnv("GITHUB_REPOSITORY", "SammyFang/MGT267watchdog");
+
+  return repository ? `${serverUrl}/${repository}` : "";
+}
+
+function statusPageUrl() {
+  const configured = optionalEnv("STATUS_PAGE_URL", "");
+
+  if (configured) {
+    return configured;
+  }
+
+  const repository = optionalEnv("GITHUB_REPOSITORY", "");
+  if (!repository.includes("/")) {
+    return "";
+  }
+
+  const [owner, repo] = repository.split("/");
+  return `https://${owner}.github.io/${repo}/`;
+}
+
 function buildWatchdogMarkdownSummary(config, record, standingReport, options = {}) {
   const kind = options.kind === "warning" ? "15-minute warning check" : "hourly monitor";
   const watchlist = options.watchlist || [];
@@ -4140,6 +4163,292 @@ function buildWatchdogMarkdownSummary(config, record, standingReport, options = 
     "",
   ]
     .join("\n");
+}
+
+function statusSiteDir(config) {
+  return path.resolve(
+    process.cwd(),
+    config.output.status_site_dir || ".monitor-state/status-site",
+  );
+}
+
+function statusPageTable(headers, rows) {
+  if (!rows.length) {
+    return '<div class="empty">No data available.</div>';
+  }
+
+  return [
+    "<table>",
+    "<thead><tr>",
+    ...headers.map((header) => `<th>${escapeHtml(header)}</th>`),
+    "</tr></thead><tbody>",
+    ...rows.map((row) =>
+      `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`,
+    ),
+    "</tbody></table>",
+  ].join("");
+}
+
+function compactAlertRows(alerts = []) {
+  return alerts.map((alert) => [
+    alert.severity || "",
+    alert.label || "",
+    alert.currentRaw || alert.current || "",
+    `${alert.operator || ""} ${alert.thresholdRaw || alert.threshold || ""}`.trim(),
+    alert.message || "",
+  ]);
+}
+
+function compactAdjustmentRows(adjustmentPlan = {}) {
+  return (adjustmentPlan.recommendations || []).slice(0, 8).map((item) => [
+    item.area || "",
+    item.parameter || "",
+    item.baseline || "",
+    item.suggested || "",
+    item.direction || "",
+    item.reason || "",
+  ]);
+}
+
+function compactStandingRows(standingReport = {}) {
+  return (standingReport.rows || []).slice(0, 12).map((row) => [
+    row.rank || "",
+    row.team || "",
+    row.cash || "",
+    row.gapAmountText || "",
+    row.gapPercentText || "",
+  ]);
+}
+
+function buildStatusPageHtml(config, record, standingReport, options = {}) {
+  const alerts = options.metricAlerts || [];
+  const alertCount = alerts.length;
+  const criticalCount = alerts.filter((item) => item.severity === "critical").length;
+  const statusClass = criticalCount > 0 ? "critical" : alertCount > 0 ? "warning" : "ok";
+  const statusText =
+    alertCount > 0
+      ? `${alertCount} active alert${alertCount === 1 ? "" : "s"} (${criticalCount} critical)`
+      : "No active alerts";
+  const issueUrl = options.githubIssueUrl || "";
+  const pageUrl = statusPageUrl();
+  const runUrl = actionsRunUrl();
+  const repoUrl = githubRepositoryUrl();
+  const gameUrl = config.email?.game_entry_url || config.crawl.entry_url;
+  const applyUrl = policyApplyWorkflowUrl(config);
+  const generatedAt = record.checkedAtLocal || record.checkedAt || "n/a";
+
+  return [
+    "<!doctype html>",
+    '<html lang="en">',
+    "<head>",
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width,initial-scale=1">',
+    '<meta http-equiv="refresh" content="60">',
+    "<title>MGT267 Watchdog Live Status</title>",
+    "<style>",
+    ":root{color-scheme:light;--bg:#f6f7f9;--ink:#111827;--muted:#5b6472;--line:#d7dde6;--card:#fff;--blue:#1d4ed8;--green:#047857;--red:#b91c1c;--amber:#b45309}",
+    "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}main{max-width:1160px;margin:0 auto;padding:22px}",
+    ".top{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;margin-bottom:16px}.title h1{font-size:26px;line-height:1.1;margin:0}.title p{margin:6px 0 0;color:var(--muted)}",
+    ".pill{display:inline-flex;align-items:center;border-radius:999px;padding:8px 12px;font-size:13px;font-weight:700;border:1px solid var(--line);background:#fff}.pill.ok{color:var(--green)}.pill.warning{color:var(--amber)}.pill.critical{color:var(--red)}",
+    ".grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:14px 0}.metric{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px}.metric .label{font-size:12px;color:var(--muted);text-transform:uppercase}.metric .value{font-size:22px;font-weight:700;margin-top:4px;overflow-wrap:anywhere}",
+    ".links{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 18px}.links a{display:inline-block;text-decoration:none;color:#fff;background:var(--blue);border-radius:6px;padding:9px 12px;font-size:13px;font-weight:700}.links a.secondary{background:#334155}",
+    "section{background:var(--card);border:1px solid var(--line);border-radius:8px;margin:12px 0;overflow:hidden}section h2{font-size:17px;margin:0;padding:12px 14px;border-bottom:1px solid var(--line);background:#f8fafc}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 10px;border-bottom:1px solid #e7ebf1;text-align:left;vertical-align:top}th{font-size:12px;color:#334155;background:#f8fafc}td{overflow-wrap:anywhere}.empty{padding:12px 14px;color:var(--muted)}",
+    ".downloads a{color:var(--blue);font-weight:700}.foot{color:var(--muted);font-size:12px;margin:18px 0 4px}",
+    "@media(max-width:760px){main{padding:14px}.top{display:block}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}table{font-size:12px}}",
+    "</style>",
+    "</head>",
+    "<body><main>",
+    '<div class="top">',
+    '<div class="title">',
+    "<h1>MGT267 Watchdog Live Status</h1>",
+    `<p>Auto-refreshes every 60 seconds. Last updated ${escapeHtml(generatedAt)} ${escapeHtml(config.crawl.timezone || "")}</p>`,
+    "</div>",
+    `<div class="pill ${statusClass}">${escapeHtml(statusText)}</div>`,
+    "</div>",
+    '<div class="grid">',
+    `<div class="metric"><div class="label">Team</div><div class="value">${escapeHtml(record.targetTeam || "n/a")}</div></div>`,
+    `<div class="metric"><div class="label">Rank</div><div class="value">${escapeHtml(record.targetRank ?? "n/a")}</div></div>`,
+    `<div class="metric"><div class="label">Cash</div><div class="value">${escapeHtml(record.targetCash || "n/a")}</div></div>`,
+    `<div class="metric"><div class="label">Day</div><div class="value">${escapeHtml(record.dashboardDay || "n/a")}</div></div>`,
+    `<div class="metric"><div class="label">Warehouse Inventory</div><div class="value">${escapeHtml(record.warehouseInventory ?? "n/a")}</div></div>`,
+    `<div class="metric"><div class="label">Inventory Day</div><div class="value">${escapeHtml(record.warehouseDay || "n/a")}</div></div>`,
+    `<div class="metric"><div class="label">Email</div><div class="value">${escapeHtml(options.emailSent ? "sent" : "off")}</div></div>`,
+    `<div class="metric"><div class="label">Run Type</div><div class="value">${escapeHtml(options.kind === "warning" ? "15m" : "hourly")}</div></div>`,
+    "</div>",
+    '<div class="links">',
+    gameUrl ? `<a href="${escapeHtml(gameUrl)}">Open Game</a>` : "",
+    pageUrl ? `<a href="${escapeHtml(pageUrl)}" class="secondary">Refresh Page</a>` : "",
+    applyUrl ? `<a href="${escapeHtml(applyUrl)}" class="secondary">Apply Workflow</a>` : "",
+    issueUrl ? `<a href="${escapeHtml(issueUrl)}" class="secondary">Live Issue</a>` : "",
+    runUrl ? `<a href="${escapeHtml(runUrl)}" class="secondary">Current Run</a>` : "",
+    repoUrl ? `<a href="${escapeHtml(repoUrl)}/actions" class="secondary">Actions</a>` : "",
+    "</div>",
+    "<section><h2>Alerts</h2>",
+    statusPageTable(["Severity", "Alert", "Current", "Rule", "Message"], compactAlertRows(alerts)),
+    "</section>",
+    "<section><h2>Recommended Policy Changes</h2>",
+    statusPageTable(
+      ["Area", "Field", "Current", "Suggested", "Direction", "Reason"],
+      compactAdjustmentRows(options.adjustmentPlan),
+    ),
+    "</section>",
+    "<section><h2>Standing Snapshot</h2>",
+    statusPageTable(["Rank", "Team", "Cash", "Gap", "Gap %"], compactStandingRows(standingReport)),
+    "</section>",
+    '<section class="downloads"><h2>Downloads</h2><div class="empty">',
+    '<a href="status.json">status.json</a> | <a href="summary.md">summary.md</a> | <a href="supply_chain_data_latest.xlsx">data workbook</a> | <a href="backtest_report_latest.xlsx">backtest workbook</a>',
+    "</div></section>",
+    '<div class="foot">Developed by Yung-Sian Fang. Gmail SMTP is intentionally disabled unless EMAIL_ENABLED is set true.</div>',
+    "</main></body></html>",
+  ].join("");
+}
+
+function statusJsonPayload(record, standingReport, options = {}) {
+  return {
+    generated_at: record.checkedAt,
+    generated_at_local: record.checkedAtLocal,
+    kind: options.kind || "hourly",
+    target_team: record.targetTeam,
+    target_rank: record.targetRank,
+    target_cash: record.targetCash,
+    dashboard_day: record.dashboardDay,
+    warehouse_inventory: record.warehouseInventory,
+    warehouse_inventory_day: record.warehouseDay,
+    email_sent: Boolean(options.emailSent),
+    email_error: options.emailError || "",
+    alerts: options.metricAlerts || [],
+    adjustment_plan: options.adjustmentPlan || null,
+    standing: standingReport.rows || [],
+    action_run_url: actionsRunUrl(),
+    game_entry_url: options.config?.email?.game_entry_url || "",
+  };
+}
+
+function copyIfExists(sourcePath, destinationPath) {
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
+    return false;
+  }
+
+  ensureDir(path.dirname(destinationPath));
+  fs.copyFileSync(sourcePath, destinationPath);
+  return true;
+}
+
+function writeStatusSite(config, record, standingReport, options = {}, markdown = "") {
+  const siteDir = statusSiteDir(config);
+  ensureDir(siteDir);
+  const html = buildStatusPageHtml(config, record, standingReport, options);
+  const payload = statusJsonPayload(record, standingReport, {
+    ...options,
+    config,
+  });
+
+  fs.writeFileSync(path.join(siteDir, "index.html"), html, "utf8");
+  fs.writeFileSync(path.join(siteDir, "summary.md"), `${markdown}\n`, "utf8");
+  fs.writeFileSync(path.join(siteDir, "status.json"), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+
+  const downloadable = [
+    [config.output.data_workbook_xlsx, "supply_chain_data_latest.xlsx"],
+    [config.output.backtest_xlsx, "backtest_report_latest.xlsx"],
+    [config.output.adjustment_plan_csv, "adjustment_plan_latest.csv"],
+    [config.output.policy_snapshot_csv, "policy_snapshot_latest.csv"],
+    [config.output.standing_gaps_csv, "standing_gaps_latest.csv"],
+  ];
+
+  for (const [source, filename] of downloadable) {
+    copyIfExists(path.resolve(process.cwd(), source || ""), path.join(siteDir, filename));
+  }
+
+  return siteDir;
+}
+
+function truncateText(text, maxLength) {
+  const value = String(text || "");
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
+}
+
+function shouldSendWecom(config, options = {}) {
+  const cfg = config.notifications?.wecom || {};
+
+  if (cfg.enabled === false || !isTruthyEnv("WECOM_ENABLED")) {
+    return false;
+  }
+
+  const mode = optionalEnv("WECOM_NOTIFY_MODE", cfg.notify_mode || "alerts").toLowerCase();
+  const alerts = options.metricAlerts || [];
+
+  return mode === "all" || alerts.length > 0;
+}
+
+function buildWecomMarkdown(config, record, standingReport, options = {}) {
+  const alerts = options.metricAlerts || [];
+  const alertLine = alerts.length
+    ? alerts.map((alert) => `> ${alert.severity || "alert"} ${alert.label}: ${alert.currentRaw || alert.current || "n/a"} ${alert.operator || ""} ${alert.thresholdRaw || ""}`).join("\n")
+    : "> No active alerts";
+  const topRecommendation = (options.adjustmentPlan?.recommendations || [])[0];
+  const pageUrl = statusPageUrl();
+  const issueUrl = options.githubIssueUrl || "";
+  const runUrl = actionsRunUrl();
+
+  return truncateText(
+    [
+      `**MGT267 Watchdog ${options.kind === "warning" ? "15m" : "hourly"}**`,
+      `Team ${record.targetTeam || "n/a"} rank ${record.targetRank ?? "n/a"} cash ${record.targetCash || "n/a"} day ${record.dashboardDay || "n/a"}`,
+      `Warehouse inventory: ${record.warehouseInventory ?? "n/a"}`,
+      "",
+      alertLine,
+      topRecommendation
+        ? `\nSuggestion: ${topRecommendation.area}.${topRecommendation.parameter} ${topRecommendation.baseline || "n/a"} -> ${topRecommendation.suggested || "n/a"} (${topRecommendation.direction || "n/a"})`
+        : "",
+      pageUrl ? `\nStatus page: ${pageUrl}` : "",
+      issueUrl ? `Live issue: ${issueUrl}` : "",
+      runUrl ? `Run: ${runUrl}` : "",
+    ].filter(Boolean).join("\n"),
+    3500,
+  );
+}
+
+async function sendWecomNotification(config, record, standingReport, options = {}) {
+  if (!shouldSendWecom(config, options)) {
+    return false;
+  }
+
+  const cfg = config.notifications?.wecom || {};
+  const webhook = optionalEnv(cfg.webhook_url_env || "WECOM_WEBHOOK_URL", "");
+
+  if (!webhook) {
+    console.log("WeCom notification skipped because WECOM_WEBHOOK_URL is not set.");
+    return false;
+  }
+
+  const content = buildWecomMarkdown(config, record, standingReport, options);
+  const response = await fetch(webhook, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      msgtype: "markdown",
+      markdown: { content },
+    }),
+  });
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`WeCom webhook failed: HTTP ${response.status} ${text}`);
+  }
+
+  let result = {};
+  try {
+    result = JSON.parse(text);
+  } catch {
+    result = { raw: text };
+  }
+
+  if (result.errcode && result.errcode !== 0) {
+    throw new Error(`WeCom webhook rejected message: ${text}`);
+  }
+
+  console.log("WeCom notification sent.");
+  return true;
 }
 
 function appendStepSummary(markdown) {
@@ -4226,24 +4535,52 @@ async function publishGithubIssueStatus(config, markdown) {
       console.log(`Duplicate GitHub live status issue closed: #${duplicate.number}`);
     }
     console.log(`GitHub live status issue updated: #${existing.number}`);
-    return true;
+    return existing.html_url || "";
   }
 
   const created = await githubApi(config, "POST", "/issues", { title, body });
   console.log(`GitHub live status issue created: #${created.number}`);
-  return true;
+  return created.html_url || "";
 }
 
 async function publishMonitorStatus(config, record, standingReport, options = {}) {
-  const markdown = buildWatchdogMarkdownSummary(config, record, standingReport, options);
+  let issueUrl = "";
+  let githubIssueUpdated = false;
+
+  try {
+    issueUrl = (await publishGithubIssueStatus(
+      config,
+      buildWatchdogMarkdownSummary(config, record, standingReport, options),
+    )) || "";
+    githubIssueUpdated = Boolean(issueUrl);
+  } catch (error) {
+    console.log(`GitHub issue status failed: ${error.message}`);
+  }
+
+  const finalOptions = { ...options, githubIssueUrl: issueUrl };
+  const markdown = buildWatchdogMarkdownSummary(
+    config,
+    record,
+    standingReport,
+    finalOptions,
+  );
+  const siteDir = writeStatusSite(
+    config,
+    record,
+    standingReport,
+    finalOptions,
+    markdown,
+  );
+  console.log(`Status site: ${siteDir}`);
   appendStepSummary(markdown);
 
   try {
-    return await publishGithubIssueStatus(config, markdown);
+    await sendWecomNotification(config, record, standingReport, finalOptions);
   } catch (error) {
-    console.log(`GitHub issue status failed: ${error.message}`);
-    return false;
+    console.log(`WeCom notification failed: ${error.message}`);
   }
+
+  return githubIssueUpdated;
 }
 
 function buildStandingLines(standingReport) {
@@ -6330,20 +6667,6 @@ async function runOnce(config) {
     console.log(`Email report skipped: ${reportDecision.reason}`);
   }
 
-  const metricAlerts = watchlist.filter((item) => item.isAlert);
-  await publishMonitorStatus(config, record, standingReport, {
-    kind: "hourly",
-    operationalSnapshot,
-    metricCatalog,
-    watchlist,
-    metricAlerts,
-    adjustmentPlan,
-    policySnapshot,
-    backtestReport,
-    emailSent,
-    emailError,
-  });
-
   fs.writeFileSync(inventoryCsvPath, buildWarehouseCsv(inventoryTable), "utf8");
   fs.writeFileSync(standingCsvPath, buildStandingGapsCsv(standingReport), "utf8");
   fs.writeFileSync(
@@ -6381,6 +6704,19 @@ async function runOnce(config) {
       backtestReport,
     },
   );
+  const metricAlerts = watchlist.filter((item) => item.isAlert);
+  await publishMonitorStatus(config, record, standingReport, {
+    kind: "hourly",
+    operationalSnapshot,
+    metricCatalog,
+    watchlist,
+    metricAlerts,
+    adjustmentPlan,
+    policySnapshot,
+    backtestReport,
+    emailSent,
+    emailError,
+  });
   appendHistory(historyPath, { ...record, emailSent });
   fs.writeFileSync(
     statePath,
@@ -6515,6 +6851,10 @@ async function sendTestEmails(config) {
 
 async function sendWarningEmail(config) {
   const warningMinutes = Number(config.monitor.warning_minutes || 15);
+  const dataWorkbookPath = path.resolve(
+    process.cwd(),
+    config.output.data_workbook_xlsx,
+  );
   const { dashboard, inventoryTable, plotSnapshots, standingReport, policySnapshot } =
     await crawl(config);
   const operationalSnapshot = buildOperationalSnapshot(plotSnapshots, {});
@@ -6543,6 +6883,21 @@ async function sendWarningEmail(config) {
     policySnapshot,
   );
   const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
+  const workbookWritten = await writeDataWorkbookFile(
+    config,
+    record,
+    standingReport,
+    plotSnapshots,
+    dataWorkbookPath,
+    {
+      operationalSnapshot,
+      metricCatalog,
+      watchlist,
+      adjustmentPlan,
+      policySnapshot,
+      backtestReport,
+    },
+  );
   let emailSent = false;
   let emailError = "";
 
@@ -6596,6 +6951,7 @@ async function sendWarningEmail(config) {
   console.log(`Active inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
   console.log(`Warning rule alerts: ${warningAlerts.length}`);
   console.log(`Backtest workbook: ${backtestOutputs.workbookPath || "not written"}`);
+  console.log(`Excel data workbook: ${workbookWritten ? dataWorkbookPath : "not written"}`);
   for (const alert of warningAlerts) {
     console.log(
       `- ${alert.label}: ${alert.currentRaw || "n/a"} ${alert.operator} ${alert.thresholdRaw}`,
