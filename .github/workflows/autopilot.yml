@@ -3,7 +3,7 @@ run-name: Guarded Policy Autopilot
 
 on:
   schedule:
-    - cron: "4,9,14,19,24,29,34,39,44,49,54,59 * * * *"
+    - cron: "3,33 * * * *"
   workflow_dispatch:
   push:
     branches:
@@ -20,7 +20,7 @@ jobs:
   autopilot:
     if: github.event_name != 'push' || contains(github.event.head_commit.message, '[autopilot-now]')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
 
     steps:
       - name: Check out repository
@@ -45,8 +45,20 @@ jobs:
             warning-state-
             monitor-state-
 
-      - name: Re-crawl latest data and apply guarded recommendation
-        run: npm run apply-policy
+      - name: Re-crawl latest data and apply guarded recommendation loop
+        run: |
+          cycles=1
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            cycles=6
+          fi
+
+          for i in $(seq 1 "${cycles}"); do
+            echo "Autopilot cycle ${i}/${cycles} at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            npm run apply-policy
+            if [ "${i}" -lt "${cycles}" ]; then
+              sleep 300
+            fi
+          done
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
