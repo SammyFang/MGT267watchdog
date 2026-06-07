@@ -1,108 +1,27 @@
 name: Guarded Policy Autopilot
-run-name: Guarded Policy Autopilot
+run-name: Guarded Policy Autopilot Disabled
 
 on:
-  schedule:
-    - cron: "3,33 * * * *"
   workflow_dispatch:
   push:
     branches:
       - main
 
 permissions:
-  actions: write
   contents: read
 
 concurrency:
   group: supply-chain-policy-autopilot
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  autopilot:
-    if: github.event_name != 'push' || contains(github.event.head_commit.message, '[autopilot-now]')
+  autopilot-disabled:
+    if: github.event_name != 'push' || contains(github.event.head_commit.message, '[autopilot-stop]')
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 2
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Restore autopilot state
-        uses: actions/cache/restore@v4
-        with:
-          path: .monitor-state
-          key: autopilot-state-${{ github.run_id }}
-          restore-keys: |
-            autopilot-state-
-            warning-state-
-            monitor-state-
-
-      - name: Re-crawl latest data and apply guarded recommendation loop
+      - name: Autopilot disabled
         run: |
-          cycles=1
-          if [ "${GITHUB_EVENT_NAME}" = "schedule" ] || [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            cycles=6
-          fi
-
-          for i in $(seq 1 "${cycles}"); do
-            echo "Autopilot cycle ${i}/${cycles} at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            npm run apply-policy
-            if [ "${i}" -lt "${cycles}" ]; then
-              sleep 300
-            fi
-          done
-        env:
-          SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
-          SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
-          SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
-          POLICY_APPLY_AUTOPILOT: "true"
-          POLICY_AUTOPILOT_ENABLED: ${{ vars.POLICY_AUTOPILOT_ENABLED || 'true' }}
-          POLICY_APPLY_CONFIRM: "APPLY"
-          POLICY_APPLY_MODE: "recommended"
-          POLICY_APPLY_DRY_RUN: "false"
-          POLICY_ALLOW_SHIPPING_METHOD_CHANGE: "false"
-
-      - name: Save autopilot state
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: .monitor-state
-          key: autopilot-state-${{ github.run_id }}
-
-      - name: Upload autopilot output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: autopilot-output
-          path: .monitor-state
-          if-no-files-found: ignore
-          include-hidden-files: true
-
-      - name: Dispatch next autopilot run
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          POLICY_AUTOPILOT_SELF_DISPATCH: ${{ vars.POLICY_AUTOPILOT_SELF_DISPATCH || 'true' }}
-        run: |
-          if [ "${POLICY_AUTOPILOT_SELF_DISPATCH}" != "true" ]; then
-            echo "Self-dispatch disabled."
-            exit 0
-          fi
-
-          ref="${GITHUB_REF_NAME:-main}"
-          echo "Dispatching next autopilot run on ${ref}."
-          curl -sS -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/autopilot.yml/dispatches" \
-            -d "{\"ref\":\"${ref}\"}"
+          echo "Guarded Policy Autopilot is disabled."
+          echo "No crawl, dry-run, game form submit, or self-dispatch will run."
