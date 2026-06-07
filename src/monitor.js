@@ -3028,12 +3028,14 @@ function policyApplyMarkdownSummary(report) {
   const acceptedCount = changes.filter((item) => item.accepted).length;
   const appliedCount = changes.filter((item) => item.applied).length;
   const verifiedCount = changes.filter((item) => item.verified).length;
-  const status = report.dry_run
-    ? "DRY RUN ONLY - no game forms were submitted."
-    : appliedCount > 0
-      ? "GAME UPDATE SUBMITTED."
-      : report.autopilot?.enabled
-        ? "NO GAME UPDATE - autopilot guardrails blocked submit."
+  const autopilotBlocked =
+    report.autopilot?.enabled && report.safety?.game_updates_enabled === false;
+  const status = appliedCount > 0
+    ? "GAME UPDATE SUBMITTED."
+    : autopilotBlocked
+      ? "NO GAME UPDATE - autopilot guardrails blocked submit."
+      : report.dry_run
+        ? "NO GAME UPDATE - form submit disabled."
         : "NO GAME UPDATE - no accepted changes were submitted.";
   const rows = changes.map((item) =>
     [
@@ -3058,7 +3060,9 @@ function policyApplyMarkdownSummary(report) {
     "",
     `- Mode: ${report.mode}`,
     `- Confirm: ${report.confirm}`,
-    `- Dry run: ${report.dry_run ? "yes" : "no"}`,
+    report.autopilot?.enabled
+      ? `- Game submit enabled: ${report.safety?.game_updates_enabled ? "yes" : "no"}`
+      : `- Dry run: ${report.dry_run ? "yes" : "no"}`,
     report.autopilot?.enabled
       ? `- Autopilot: ${report.autopilot.apply_allowed ? "allowed" : "blocked"}; ${report.autopilot.reason}`
       : "",
@@ -3361,7 +3365,7 @@ function buildAutopilotDecision(config, previousState, record, validated, candid
     last_apply_day: Number.isFinite(lastApplyDay) ? lastApplyDay : null,
     minimum_game_days_between_apply: minGameDaysBetweenApply,
     accepted_change_count: accepted.length,
-    stale_run_protection: "Every autopilot run re-crawls the latest game pages immediately before submit; workflow concurrency cancels older in-progress autopilot runs.",
+    stale_run_protection: "Every autopilot cycle re-crawls the latest game pages immediately before submit; GitHub concurrency keeps policy updates serialized so one cycle cannot overlap another.",
   };
 }
 
@@ -7698,8 +7702,12 @@ async function runPolicyApply(config) {
 
   console.log("Policy apply summary:");
   console.log(`Mode: ${mode}`);
-  console.log(`Dry run: ${dryRun ? "yes" : "no"}`);
   console.log(`Autopilot: ${autopilotRun ? "yes" : "no"}`);
+  console.log(
+    autopilotRun
+      ? `Game submit enabled: ${dryRun ? "no" : "yes"}`
+      : `Dry run: ${dryRun ? "yes" : "no"}`,
+  );
   if (autopilotRun) {
     console.log(`Autopilot decision: ${autopilotDecision.apply_allowed ? "allow" : "block"} - ${autopilotDecision.reason}`);
     console.log(`Autopilot signature: ${autopilotDecision.current_signature || "n/a"}`);

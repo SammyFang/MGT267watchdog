@@ -1,5 +1,5 @@
 name: Apply Recommended Policy
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('Apply Policy ({0}, dry_run={1}, mode={2})', inputs.confirm, inputs.dry_run, inputs.apply_mode) || 'Apply Policy push dry-run' }}
+run-name: Apply Recommended Policy
 
 on:
   workflow_dispatch:
@@ -60,9 +60,6 @@ on:
           - "false"
           - "true"
         default: "false"
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -73,7 +70,6 @@ concurrency:
 
 jobs:
   apply-policy:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[apply-dry-run]')
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -96,16 +92,16 @@ jobs:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
           SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
-          POLICY_APPLY_CONFIRM: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm || 'DRY_RUN' }}
-          POLICY_APPLY_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_mode || 'recommended' }}
-          POLICY_APPLY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
-          POLICY_FACTORY_ORDER_POINT: ${{ github.event_name == 'workflow_dispatch' && inputs.factory_order_point || '' }}
-          POLICY_FACTORY_QUANTITY: ${{ github.event_name == 'workflow_dispatch' && inputs.factory_quantity || '' }}
-          POLICY_FACTORY_SHIPPING_METHOD: ${{ github.event_name == 'workflow_dispatch' && inputs.factory_shipping_method || '' }}
-          POLICY_WAREHOUSE_ORDER_POINT: ${{ github.event_name == 'workflow_dispatch' && inputs.warehouse_order_point || '' }}
-          POLICY_WAREHOUSE_QUANTITY: ${{ github.event_name == 'workflow_dispatch' && inputs.warehouse_quantity || '' }}
-          POLICY_WAREHOUSE_SHIPPING_METHOD: ${{ github.event_name == 'workflow_dispatch' && inputs.warehouse_shipping_method || '' }}
-          POLICY_ALLOW_SHIPPING_METHOD_CHANGE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_shipping_method_change || 'false' }}
+          POLICY_APPLY_CONFIRM: ${{ inputs.confirm }}
+          POLICY_APPLY_MODE: ${{ inputs.apply_mode }}
+          POLICY_APPLY_DRY_RUN: ${{ inputs.dry_run }}
+          POLICY_FACTORY_ORDER_POINT: ${{ inputs.factory_order_point }}
+          POLICY_FACTORY_QUANTITY: ${{ inputs.factory_quantity }}
+          POLICY_FACTORY_SHIPPING_METHOD: ${{ inputs.factory_shipping_method }}
+          POLICY_WAREHOUSE_ORDER_POINT: ${{ inputs.warehouse_order_point }}
+          POLICY_WAREHOUSE_QUANTITY: ${{ inputs.warehouse_quantity }}
+          POLICY_WAREHOUSE_SHIPPING_METHOD: ${{ inputs.warehouse_shipping_method }}
+          POLICY_ALLOW_SHIPPING_METHOD_CHANGE: ${{ inputs.allow_shipping_method_change }}
 
       - name: Upload apply output
         if: always()
