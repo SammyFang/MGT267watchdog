@@ -65,7 +65,7 @@ jobs:
           EMAIL_ENABLED: ${{ vars.EMAIL_ENABLED || 'false' }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_ISSUE_NOTIFICATIONS: "true"
-          STATUS_PAGE_URL: ${{ vars.STATUS_PAGE_URL || 'https://sammyfang.github.io/MGT267watchdog/' }}
+          STATUS_PAGE_URL: ${{ vars.STATUS_PAGE_URL || '' }}
           WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
           WECOM_ENABLED: ${{ vars.WECOM_ENABLED || 'false' }}
           WECOM_NOTIFY_MODE: ${{ vars.WECOM_NOTIFY_MODE || 'alerts' }}

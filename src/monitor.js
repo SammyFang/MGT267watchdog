@@ -4084,19 +4084,7 @@ function githubRepositoryUrl() {
 }
 
 function statusPageUrl() {
-  const configured = optionalEnv("STATUS_PAGE_URL", "");
-
-  if (configured) {
-    return configured;
-  }
-
-  const repository = optionalEnv("GITHUB_REPOSITORY", "");
-  if (!repository.includes("/")) {
-    return "";
-  }
-
-  const [owner, repo] = repository.split("/");
-  return `https://${owner}.github.io/${repo}/`;
+  return optionalEnv("STATUS_PAGE_URL", "");
 }
 
 function buildWatchdogMarkdownSummary(config, record, standingReport, options = {}) {
