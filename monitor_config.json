@@ -341,6 +341,13 @@
   "email": {
     "enabled": true,
     "game_entry_url": "https://op.responsive.net/sc/riverside267/entry.html",
+    "notification_policy": {
+      "hourly_report_email": true,
+      "day_change_email": false,
+      "alert_email": true,
+      "github_issue_email": true,
+      "event_min_interval_minutes": 55
+    },
     "recipients": [
       "950154@gmail.com",
       "wgong009@ucr.edu",

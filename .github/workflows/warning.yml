@@ -1,14 +1,15 @@
-name: 15-Minute Warning Monitor
+name: Sim-Day Notification Monitor
 
 on:
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    - cron: "9 */4 * * *"
   workflow_dispatch:
   push:
     branches:
       - main
 
 permissions:
+  actions: write
   contents: read
   issues: write
   pages: write
@@ -16,13 +17,13 @@ permissions:
 
 concurrency:
   group: supply-chain-warning
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   warning-monitor:
     if: github.event_name != 'push' || contains(github.event.head_commit.message, '[warning-now]')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 80
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -49,8 +50,32 @@ jobs:
             warning-state-
             monitor-state-
 
-      - name: Check dynamic warning rules
-        run: npm run warning-email
+      - name: Check sim-day notifications
+        run: |
+          set -euo pipefail
+
+          cycles="${WARNING_MONITOR_CYCLES:-12}"
+          interval="${WARNING_MONITOR_INTERVAL_SECONDS:-300}"
+          consecutive_failures=0
+          echo "Starting sim-day notification loop: ${cycles} cycle(s), ${interval}s interval."
+
+          for cycle in $(seq 1 "${cycles}"); do
+            echo "::group::Sim-day monitor cycle ${cycle}/${cycles}"
+            if npm run warning-email; then
+              consecutive_failures=0
+            else
+              rc="$?"
+              consecutive_failures=$((consecutive_failures + 1))
+              echo "::warning::Sim-day monitor cycle ${cycle} failed with exit code ${rc}; the loop will retry after the normal interval."
+            fi
+            echo "::endgroup::"
+
+            if [ "${cycle}" -lt "${cycles}" ]; then
+              sleep "${interval}"
+            fi
+          done
+
+          echo "Sim-day notification loop completed. Consecutive failed cycles at end: ${consecutive_failures}."
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
@@ -69,6 +94,9 @@ jobs:
           WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
           WECOM_ENABLED: ${{ vars.WECOM_ENABLED || 'false' }}
           WECOM_NOTIFY_MODE: ${{ vars.WECOM_NOTIFY_MODE || 'alerts_or_day_change' }}
+          WARNING_MONITOR_CYCLES: ${{ vars.WARNING_MONITOR_CYCLES || '12' }}
+          WARNING_MONITOR_INTERVAL_SECONDS: ${{ vars.WARNING_MONITOR_INTERVAL_SECONDS || '300' }}
+          EMAIL_EVENT_MIN_INTERVAL_MINUTES: ${{ vars.EMAIL_EVENT_MIN_INTERVAL_MINUTES || '55' }}
 
       - name: Save warning state
         if: always()
@@ -125,3 +153,18 @@ jobs:
         if: always()
         continue-on-error: true
         uses: actions/deploy-pages@v4
+
+      - name: Queue next sim-day notification run
+        if: ${{ always() && !cancelled() && (vars.WARNING_SELF_DISPATCH || 'true') != 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          curl -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPOSITORY}/actions/workflows/warning.yml/dispatches" \
+            -d '{"ref":"main"}'
+          echo "Queued next sim-day notification run."

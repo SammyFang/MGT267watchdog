@@ -4161,6 +4161,77 @@ function shouldSendReportNow(config, previousState) {
   };
 }
 
+function emailElapsedDecision(previousState, intervalMinutes, forcedReason = "") {
+  if (forcedReason) {
+    return {
+      send: true,
+      reason: forcedReason,
+    };
+  }
+
+  if (!Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {
+    return {
+      send: true,
+      reason: "no email interval throttle configured",
+    };
+  }
+
+  if (!previousState.last_email_sent_at) {
+    return {
+      send: true,
+      reason: "no previous email timestamp",
+    };
+  }
+
+  const lastSentAt = new Date(previousState.last_email_sent_at).getTime();
+
+  if (!Number.isFinite(lastSentAt)) {
+    return {
+      send: true,
+      reason: "invalid previous email timestamp",
+    };
+  }
+
+  const elapsedMinutes = (Date.now() - lastSentAt) / 60000;
+
+  return {
+    send: elapsedMinutes >= intervalMinutes,
+    reason: `last email ${elapsedMinutes.toFixed(1)} minutes ago; minimum interval ${intervalMinutes} minutes`,
+  };
+}
+
+function shouldSendEventEmailNow(config, previousState, reasons = []) {
+  const policy = config.email?.notification_policy || {};
+  const enabledReasons = reasons.filter(Boolean);
+
+  if (isTruthyEnv("FORCE_EMAIL_REPORT")) {
+    return {
+      send: true,
+      reason: "forced by workflow trigger",
+      reasons: enabledReasons,
+    };
+  }
+
+  if (enabledReasons.length === 0) {
+    return {
+      send: false,
+      reason: "no event email reasons after policy filtering",
+      reasons: enabledReasons,
+    };
+  }
+
+  const envInterval = optionalEnv("EMAIL_EVENT_MIN_INTERVAL_MINUTES", "");
+  const intervalMinutes = Number(
+    envInterval || policy.event_min_interval_minutes || config.monitor.report_min_interval_minutes || 55,
+  );
+  const elapsedDecision = emailElapsedDecision(previousState, intervalMinutes);
+
+  return {
+    ...elapsedDecision,
+    reasons: enabledReasons,
+  };
+}
+
 function normalizeRecipients(recipients) {
   return [...new Set((recipients || []).map((item) => String(item).trim()).filter(Boolean))];
 }
@@ -4701,25 +4772,39 @@ function buildWecomMarkdown(config, record, standingReport, options = {}) {
   const alertLine = alerts.length
     ? alerts.map((alert) => `> ${alert.severity || "alert"} ${alert.label}: ${alert.currentRaw || alert.current || "n/a"} ${alert.operator || ""} ${alert.thresholdRaw || ""}`).join("\n")
     : "> No active alerts";
-  const topRecommendation = (options.adjustmentPlan?.recommendations || [])[0];
+  const recommendations = (options.adjustmentPlan?.recommendations || [])
+    .slice(0, 4)
+    .map((item) => `- ${item.area}.${item.parameter}: ${item.baseline || "n/a"} -> ${item.suggested || "n/a"} (${item.direction || "n/a"})`);
   const review = options.dayChangeReview || {};
   const pageUrl = statusPageUrl();
   const issueUrl = options.githubIssueUrl || "";
   const runUrl = actionsRunUrl();
+  const gameUrl = config.email?.game_entry_url || config.crawl.entry_url;
+  const latest = review.latest || {};
+  const backtest = review.backtest || {};
 
   return truncateText(
     [
-      `**MGT267 Watchdog ${options.kind === "warning" ? "15m" : "hourly"}**`,
+      `**MGT267 Watchdog ${options.kind === "warning" ? "sim-day monitor" : "hourly report"}**`,
       `Team ${record.targetTeam || "n/a"} rank ${record.targetRank ?? "n/a"} cash ${record.targetCash || "n/a"} day ${record.dashboardDay || "n/a"}`,
-      `Warehouse inventory: ${record.warehouseInventory ?? "n/a"}`,
+      `Remaining: ${review.remaining_days ?? "n/a"} day(s); phase: ${review.phase || "n/a"}; posture: ${review.posture || "n/a"}`,
       review.enabled
-        ? `Sim day review: ${review.changed ? "changed" : "unchanged"} ${review.previous_day ?? "n/a"} -> ${review.current_day ?? "n/a"}; remaining ${review.remaining_days ?? "n/a"}; phase ${review.phase || "n/a"}`
+        ? `Sim day: ${review.changed ? "changed" : "unchanged"} ${review.previous_day ?? "n/a"} -> ${review.current_day ?? "n/a"}`
         : "",
       "",
+      `Monitor: inventory ${latest.warehouse_inventory ?? record.warehouseInventory ?? "n/a"}, demand ${latest.demand ?? "n/a"}, shipments ${latest.shipments ?? "n/a"}, lost demand ${latest.lost_demand ?? "n/a"}, cover ${latest.days_of_cover ?? "n/a"}`,
+      `Cash gap: nearest ${latest.cash_lead_percent_vs_nearest ?? "n/a"}; rank ${record.targetRank ?? "n/a"}`,
+      "",
       alertLine,
-      topRecommendation
-        ? `\nSuggestion: ${topRecommendation.area}.${topRecommendation.parameter} ${topRecommendation.baseline || "n/a"} -> ${topRecommendation.suggested || "n/a"} (${topRecommendation.direction || "n/a"})`
-        : "",
+      "",
+      recommendations.length
+        ? ["Decision candidates:", ...recommendations].join("\n")
+        : "Decision candidates: none; hold unless alerts worsen.",
+      backtest.recommendations?.length
+        ? `Backtest: ${backtest.recommendations.slice(0, 2).join("; ")}`
+        : `Backtest: ${backtest.window || "n/a"}; observations ${backtest.observations ?? "n/a"}`,
+      "",
+      gameUrl ? `Game: ${gameUrl}` : "",
       pageUrl ? `\nStatus page: ${pageUrl}` : "",
       issueUrl ? `Live issue: ${issueUrl}` : "",
       runUrl ? `Run: ${runUrl}` : "",
@@ -4866,6 +4951,7 @@ async function publishGithubIssueStatus(config, markdown) {
 async function publishMonitorStatus(config, record, standingReport, options = {}) {
   let issueUrl = "";
   let githubIssueUpdated = false;
+  let wecomSent = false;
 
   try {
     issueUrl = (await publishGithubIssueStatus(
@@ -4895,12 +4981,16 @@ async function publishMonitorStatus(config, record, standingReport, options = {}
   appendStepSummary(markdown);
 
   try {
-    await sendWecomNotification(config, record, standingReport, finalOptions);
+    wecomSent = await sendWecomNotification(config, record, standingReport, finalOptions);
   } catch (error) {
     console.log(`WeCom notification failed: ${error.message}`);
   }
 
-  return githubIssueUpdated;
+  return {
+    githubIssueUpdated,
+    githubIssueUrl: issueUrl,
+    wecomSent,
+  };
 }
 
 function buildStandingLines(standingReport) {
@@ -6037,6 +6127,7 @@ function buildReportText(config, record, standingReport, options = {}) {
     `Inventory reference crossed: ${record.inventoryCheckpoint ? "yes" : "no"}`,
     `Active inventory alert: ${record.inventoryAlert ? "YES" : "no"}`,
     `Game entry URL: ${gameEntryUrl}`,
+    options.githubIssueUrl ? `Live GitHub issue: ${options.githubIssueUrl}` : "",
     ...buildWatchlistLines(options.watchlist),
     "",
     "Recommendations",
@@ -6087,6 +6178,28 @@ function buildGameLinkHtml(config) {
     "</td>",
     '<td style="padding:14px 16px;text-align:right;white-space:nowrap;">',
     `<a href="${escapeHtml(url)}" style="display:inline-block;background:#1d4ed8;color:#ffffff;text-decoration:none;border-radius:6px;padding:10px 14px;font-size:13px;font-weight:700;">Open Game</a>`,
+    "</td>",
+    "</tr>",
+    "</table>",
+    "</div>",
+  ].join("");
+}
+
+function buildIssueLinkHtml(issueUrl) {
+  if (!issueUrl) {
+    return "";
+  }
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #c7d2fe;border-radius:8px;background:#eef2ff;">',
+    "<tr>",
+    '<td style="padding:14px 16px;">',
+    '<div style="font-size:13px;color:#312e81;font-weight:700;margin-bottom:4px;">Live GitHub Issue</div>',
+    '<div style="font-size:12px;color:#475569;">Latest monitor summary, decision notes, status page links, and workflow evidence.</div>',
+    "</td>",
+    '<td style="padding:14px 16px;text-align:right;white-space:nowrap;">',
+    `<a href="${escapeHtml(issueUrl)}" style="display:inline-block;background:#4338ca;color:#ffffff;text-decoration:none;border-radius:6px;padding:10px 14px;font-size:13px;font-weight:700;">Open Issue</a>`,
     "</td>",
     "</tr>",
     "</table>",
@@ -6600,6 +6713,7 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     "</tr>",
     "</table>",
     buildGameLinkHtml(config),
+    buildIssueLinkHtml(options.githubIssueUrl),
     buildDayChangeReviewHtml(options.dayChangeReview),
     buildWatchlistHtml(options.watchlist),
     buildRecommendationsHtml(options.recommendations),
@@ -7030,27 +7144,8 @@ async function runOnce(config) {
   const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
   let emailSent = false;
   let emailError = "";
+  let statusResult = {};
   const reportDecision = shouldSendReportNow(config, previousState);
-
-  if (config.monitor.send_report_every_run && reportDecision.send) {
-    try {
-      emailSent = await sendReportEmail(config, record, standingReport, {
-        operationalSnapshot,
-        plotSnapshots,
-        metricCatalog,
-        watchlist,
-        adjustmentPlan,
-        policySnapshot,
-        backtestReport,
-        dayChangeReview,
-      });
-    } catch (error) {
-      emailError = error.message;
-      console.log(`Email report failed but monitoring will continue: ${emailError}`);
-    }
-  } else if (config.monitor.send_report_every_run) {
-    console.log(`Email report skipped: ${reportDecision.reason}`);
-  }
 
   fs.writeFileSync(inventoryCsvPath, buildWarehouseCsv(inventoryTable), "utf8");
   fs.writeFileSync(standingCsvPath, buildStandingGapsCsv(standingReport), "utf8");
@@ -7090,7 +7185,7 @@ async function runOnce(config) {
     },
   );
   const metricAlerts = watchlist.filter((item) => item.isAlert);
-  await publishMonitorStatus(config, record, standingReport, {
+  statusResult = await publishMonitorStatus(config, record, standingReport, {
     kind: "hourly",
     operationalSnapshot,
     metricCatalog,
@@ -7103,6 +7198,31 @@ async function runOnce(config) {
     emailSent,
     emailError,
   });
+
+  if (
+    config.monitor.send_report_every_run &&
+    config.email?.notification_policy?.hourly_report_email !== false &&
+    reportDecision.send
+  ) {
+    try {
+      emailSent = await sendReportEmail(config, record, standingReport, {
+        operationalSnapshot,
+        plotSnapshots,
+        metricCatalog,
+        watchlist,
+        adjustmentPlan,
+        policySnapshot,
+        backtestReport,
+        dayChangeReview,
+        githubIssueUrl: statusResult.githubIssueUrl || previousState.last_github_issue_url || "",
+      });
+    } catch (error) {
+      emailError = error.message;
+      console.log(`Email report failed but monitoring will continue: ${emailError}`);
+    }
+  } else if (config.monitor.send_report_every_run) {
+    console.log(`Email report skipped: ${reportDecision.reason}`);
+  }
   appendHistory(historyPath, { ...record, emailSent });
   fs.writeFileSync(
     statePath,
@@ -7311,8 +7431,47 @@ async function sendWarningEmail(config) {
   );
   let emailSent = false;
   let emailError = "";
+  const statusResult = await publishMonitorStatus(config, record, standingReport, {
+    kind: "warning",
+    warningMinutes,
+    operationalSnapshot,
+    plotSnapshots,
+    policySnapshot,
+    metricCatalog,
+    watchlist,
+    metricAlerts: warningAlerts,
+    adjustmentPlan,
+    backtestReport,
+    dayChangeReview,
+    emailSent,
+    emailError,
+  });
+  const emailPolicy = config.email?.notification_policy || {};
+  const emailReasons = [];
 
-  if (warningAlerts.length > 0 || dayChangeReview.changed) {
+  if (emailPolicy.alert_email !== false && warningAlerts.length > 0) {
+    emailReasons.push(
+      `${warningAlerts.length} warning alert${warningAlerts.length === 1 ? "" : "s"}`,
+    );
+  }
+
+  if (emailPolicy.day_change_email === true && dayChangeReview.changed) {
+    emailReasons.push(
+      `sim day changed ${dayChangeReview.previous_day ?? "n/a"} -> ${dayChangeReview.current_day ?? "n/a"}`,
+    );
+  }
+
+  if (emailPolicy.github_issue_email !== false && statusResult.githubIssueUpdated) {
+    emailReasons.push("GitHub live issue updated");
+  }
+
+  const eventEmailDecision = shouldSendEventEmailNow(
+    config,
+    previousState,
+    emailReasons,
+  );
+
+  if (eventEmailDecision.send) {
     try {
       emailSent = await sendReportEmail(
         config,
@@ -7330,29 +7489,17 @@ async function sendWarningEmail(config) {
           adjustmentPlan,
           backtestReport,
           dayChangeReview,
+          githubIssueUrl: statusResult.githubIssueUrl || previousState.last_github_issue_url || "",
+          emailReason: eventEmailDecision.reasons.join("; "),
         },
       );
     } catch (error) {
       emailError = error.message;
       console.log(`Warning email failed but monitoring will continue: ${emailError}`);
     }
+  } else {
+    console.log(`Warning email skipped: ${eventEmailDecision.reason}`);
   }
-
-  await publishMonitorStatus(config, record, standingReport, {
-    kind: "warning",
-    warningMinutes,
-    operationalSnapshot,
-    plotSnapshots,
-    policySnapshot,
-    metricCatalog,
-    watchlist,
-    metricAlerts: warningAlerts,
-    adjustmentPlan,
-    backtestReport,
-    dayChangeReview,
-    emailSent,
-    emailError,
-  });
   fs.writeFileSync(
     statePath,
     `${JSON.stringify(
@@ -7391,6 +7538,8 @@ async function sendWarningEmail(config) {
           : previousState.last_day_change_dashboard_day || null,
         last_day_change_review: dayChangeReview,
         last_policy_pages: policySnapshot,
+        last_github_issue_url:
+          statusResult.githubIssueUrl || previousState.last_github_issue_url || null,
         last_email_sent_at: emailSent
           ? record.checkedAt
           : previousState.last_email_sent_at || null,
