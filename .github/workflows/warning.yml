@@ -14,7 +14,7 @@ permissions:
 
 concurrency:
   group: supply-chain-warning
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 jobs:
   warning-monitor:
