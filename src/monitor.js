@@ -7600,10 +7600,16 @@ async function runPolicyApply(config) {
     }
   }
 
-  const outputs = writePolicyApplyOutputs(config, report);
   const failedVerification = report.changes.filter(
     (change) => change.applied && !change.verified,
   );
+  if (failedVerification.length > 0) {
+    report.safety.verification_failed_fields = failedVerification.map(
+      (item) => `${item.area}.${item.parameter}`,
+    );
+    report.safety.note = `${report.safety.note} Verification failed for ${report.safety.verification_failed_fields.join(", ")}; next autopilot cycle will re-crawl latest values before any retry.`;
+  }
+  const outputs = writePolicyApplyOutputs(config, report);
   const policySnapshotCsvPath = path.resolve(
     process.cwd(),
     config.output.policy_snapshot_csv ||
@@ -7720,11 +7726,16 @@ async function runPolicyApply(config) {
   }
 
   if (failedVerification.length > 0) {
-    throw new Error(
-      `Policy apply submitted but verification failed for: ${failedVerification
-        .map((item) => `${item.area}.${item.parameter}`)
-        .join(", ")}`,
-    );
+    const message = `Policy apply submitted but verification failed for: ${failedVerification
+      .map((item) => `${item.area}.${item.parameter}`)
+      .join(", ")}`;
+
+    if (autopilotRun) {
+      console.error(`${message}. Autopilot will retry only after a fresh crawl and guardrail check.`);
+      return;
+    }
+
+    throw new Error(message);
   }
 }
 
