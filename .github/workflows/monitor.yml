@@ -2,7 +2,7 @@ name: Supply Chain Watchdog
 
 on:
   schedule:
-    - cron: "11,41 * * * *"
+    - cron: "11 * * * *"
   workflow_dispatch:
   push:
     branches:
@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: supply-chain-hourly
@@ -56,6 +57,9 @@ jobs:
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FORCE_EMAIL_REPORT: ${{ github.event_name != 'schedule' }}
+          EMAIL_ENABLED: ${{ vars.EMAIL_ENABLED || 'false' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ISSUE_NOTIFICATIONS: "true"
 
       - name: Save monitor state
         if: always()

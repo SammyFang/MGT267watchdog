@@ -346,6 +346,12 @@
       "url": "https://sammyfang.tw"
     }
   },
+  "notifications": {
+    "github_issue": {
+      "enabled": true,
+      "title": "MGT267 Watchdog Live Status"
+    }
+  },
   "output": {
     "state_dir": ".monitor-state",
     "latest_json": ".monitor-state/latest.json",

@@ -4061,6 +4061,177 @@ function writeEmailDeliveryLog(config, deliveryLog) {
   return filePath;
 }
 
+function markdownCell(value) {
+  return String(value ?? "")
+    .replace(/\r?\n/g, " ")
+    .replace(/\|/g, "\\|")
+    .trim();
+}
+
+function actionsRunUrl() {
+  const serverUrl = optionalEnv("GITHUB_SERVER_URL", "https://github.com");
+  const repository = optionalEnv("GITHUB_REPOSITORY", "");
+  const runId = optionalEnv("GITHUB_RUN_ID", "");
+
+  return repository && runId ? `${serverUrl}/${repository}/actions/runs/${runId}` : "";
+}
+
+function buildWatchdogMarkdownSummary(config, record, standingReport, options = {}) {
+  const kind = options.kind === "warning" ? "15-minute warning check" : "hourly monitor";
+  const watchlist = options.watchlist || [];
+  const alerts = options.metricAlerts || watchlist.filter((item) => item.isAlert);
+  const criticalCount = alerts.filter((item) => item.severity === "critical").length;
+  const runUrl = actionsRunUrl();
+  const gameUrl = config.email?.game_entry_url || config.crawl.entry_url;
+  const adjustmentItems = (options.adjustmentPlan?.recommendations || []).slice(0, 4);
+  const standingRows = (standingReport.rows || []).slice(0, 8);
+  const status =
+    alerts.length > 0
+      ? `${alerts.length} alert(s), ${criticalCount} critical`
+      : "No active warning alerts";
+
+  return [
+    `## MGT267 Watchdog ${kind}`,
+    "",
+    `**Status:** ${status}`,
+    "",
+    `- Checked at: ${record.checkedAtLocal || record.checkedAt || "n/a"} ${config.crawl.timezone || ""}`.trim(),
+    `- Team: ${record.targetTeam || "n/a"}`,
+    `- Rank: ${record.targetRank ?? "n/a"}`,
+    `- Cash: ${record.targetCash || "n/a"}`,
+    `- Dashboard day: ${record.dashboardDay || "n/a"}`,
+    `- Warehouse inventory: ${record.warehouseInventory ?? "n/a"}`,
+    `- Email sent: ${options.emailSent ? "yes" : "no"}${isEmailEnabled(config) ? "" : " (SMTP disabled for Gmail safety)"}`,
+    options.emailError ? `- Email error: ${options.emailError}` : "",
+    gameUrl ? `- Game entry: ${gameUrl}` : "",
+    runUrl ? `- GitHub run: ${runUrl}` : "",
+    "",
+    "### Alerts",
+    alerts.length
+      ? "| Severity | Alert | Current | Rule | Message |\n| --- | --- | ---: | --- | --- |\n" +
+        alerts
+          .map((alert) =>
+            `| ${markdownCell(alert.severity)} | ${markdownCell(alert.label)} | ${markdownCell(alert.currentRaw || alert.current)} | ${markdownCell(`${alert.operator} ${alert.thresholdRaw}`)} | ${markdownCell(alert.message)} |`,
+          )
+          .join("\n")
+      : "No active alerts on this check.",
+    "",
+    "### Recommended Policy Changes",
+    adjustmentItems.length
+      ? "| Area | Field | Baseline | Suggested | Direction | Reason |\n| --- | --- | ---: | ---: | --- | --- |\n" +
+        adjustmentItems
+          .map((item) =>
+            `| ${markdownCell(item.area)} | ${markdownCell(item.parameter)} | ${markdownCell(item.baseline)} | ${markdownCell(item.suggested)} | ${markdownCell(item.direction)} | ${markdownCell(item.reason)} |`,
+          )
+          .join("\n")
+      : "No policy changes recommended.",
+    "",
+    "### Standing Snapshot",
+    standingRows.length
+      ? "| Rank | Team | Cash | Gap | Gap % |\n| ---: | --- | ---: | ---: | ---: |\n" +
+        standingRows
+          .map((row) =>
+            `| ${markdownCell(row.rank)} | ${markdownCell(row.team)} | ${markdownCell(row.cash)} | ${markdownCell(row.gapAmountText)} | ${markdownCell(row.gapPercentText)} |`,
+          )
+          .join("\n")
+      : "No standing rows available.",
+    "",
+    "Artifacts contain the latest workbook, policy snapshot, backtest, and raw crawl outputs when generated.",
+    "",
+  ]
+    .join("\n");
+}
+
+function appendStepSummary(markdown) {
+  if (!process.env.GITHUB_STEP_SUMMARY || !markdown) {
+    return false;
+  }
+
+  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${markdown}\n`, "utf8");
+  return true;
+}
+
+async function githubApi(config, method, endpoint, body) {
+  const token = optionalEnv("GITHUB_TOKEN", "");
+  const repository = optionalEnv("GITHUB_REPOSITORY", "");
+
+  if (!token || !repository) {
+    return null;
+  }
+
+  const response = await fetch(`https://api.github.com/repos/${repository}${endpoint}`, {
+    method,
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "mgt267-watchdog",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GitHub API ${method} ${endpoint} failed: ${response.status} ${text}`);
+  }
+
+  if (response.status === 204) {
+    return {};
+  }
+
+  return response.json();
+}
+
+async function publishGithubIssueStatus(config, markdown) {
+  const cfg = config.notifications?.github_issue || {};
+
+  if (cfg.enabled === false || !isTruthyEnv("GITHUB_ISSUE_NOTIFICATIONS")) {
+    return false;
+  }
+
+  const token = optionalEnv("GITHUB_TOKEN", "");
+  const repository = optionalEnv("GITHUB_REPOSITORY", "");
+
+  if (!token || !repository) {
+    console.log("GitHub issue status skipped because GITHUB_TOKEN/GITHUB_REPOSITORY is unavailable.");
+    return false;
+  }
+
+  const title = cfg.title || "MGT267 Watchdog Live Status";
+  const body = [
+    markdown,
+    "---",
+    "This issue is automatically updated by GitHub Actions. SMTP email can remain disabled while monitoring continues.",
+  ].join("\n");
+  const issues = await githubApi(config, "GET", "/issues?state=open&per_page=100");
+  const existing = (issues || []).find(
+    (issue) => !issue.pull_request && issue.title === title,
+  );
+
+  if (existing) {
+    await githubApi(config, "PATCH", `/issues/${existing.number}`, { body });
+    console.log(`GitHub live status issue updated: #${existing.number}`);
+    return true;
+  }
+
+  const created = await githubApi(config, "POST", "/issues", { title, body });
+  console.log(`GitHub live status issue created: #${created.number}`);
+  return true;
+}
+
+async function publishMonitorStatus(config, record, standingReport, options = {}) {
+  const markdown = buildWatchdogMarkdownSummary(config, record, standingReport, options);
+  appendStepSummary(markdown);
+
+  try {
+    return await publishGithubIssueStatus(config, markdown);
+  } catch (error) {
+    console.log(`GitHub issue status failed: ${error.message}`);
+    return false;
+  }
+}
+
 function buildStandingLines(standingReport) {
   return standingReport.rows.map((row) =>
     [
@@ -6123,21 +6294,41 @@ async function runOnce(config) {
   );
   const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
   let emailSent = false;
+  let emailError = "";
   const reportDecision = shouldSendReportNow(config, previousState);
 
   if (config.monitor.send_report_every_run && reportDecision.send) {
-    emailSent = await sendReportEmail(config, record, standingReport, {
-      operationalSnapshot,
-      plotSnapshots,
-      metricCatalog,
-      watchlist,
-      adjustmentPlan,
-      policySnapshot,
-      backtestReport,
-    });
+    try {
+      emailSent = await sendReportEmail(config, record, standingReport, {
+        operationalSnapshot,
+        plotSnapshots,
+        metricCatalog,
+        watchlist,
+        adjustmentPlan,
+        policySnapshot,
+        backtestReport,
+      });
+    } catch (error) {
+      emailError = error.message;
+      console.log(`Email report failed but monitoring will continue: ${emailError}`);
+    }
   } else if (config.monitor.send_report_every_run) {
     console.log(`Email report skipped: ${reportDecision.reason}`);
   }
+
+  const metricAlerts = watchlist.filter((item) => item.isAlert);
+  await publishMonitorStatus(config, record, standingReport, {
+    kind: "hourly",
+    operationalSnapshot,
+    metricCatalog,
+    watchlist,
+    metricAlerts,
+    adjustmentPlan,
+    policySnapshot,
+    backtestReport,
+    emailSent,
+    emailError,
+  });
 
   fs.writeFileSync(inventoryCsvPath, buildWarehouseCsv(inventoryTable), "utf8");
   fs.writeFileSync(standingCsvPath, buildStandingGapsCsv(standingReport), "utf8");
@@ -6323,6 +6514,13 @@ async function sendWarningEmail(config) {
   );
   const watchlist = buildWatchlist(config, metricCatalog, "warning");
   const warningAlerts = watchlist.filter((item) => item.isAlert);
+  const adjustmentPlan = buildAutoAdjustmentPlan(
+    config,
+    metricCatalog,
+    record,
+    standingReport,
+    policySnapshot,
+  );
   const backtestReport = buildBacktestReport(
     config,
     record,
@@ -6332,25 +6530,47 @@ async function sendWarningEmail(config) {
   );
   const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
   let emailSent = false;
+  let emailError = "";
 
   if (warningAlerts.length > 0) {
-    emailSent = await sendReportEmail(
-      config,
-      record,
-      standingReport,
-      {
-        kind: "warning",
-        warningMinutes,
-        operationalSnapshot,
-        plotSnapshots,
-        policySnapshot,
-        metricCatalog,
-        watchlist,
-        metricAlerts: warningAlerts,
-        backtestReport,
-      },
-    );
+    try {
+      emailSent = await sendReportEmail(
+        config,
+        record,
+        standingReport,
+        {
+          kind: "warning",
+          warningMinutes,
+          operationalSnapshot,
+          plotSnapshots,
+          policySnapshot,
+          metricCatalog,
+          watchlist,
+          metricAlerts: warningAlerts,
+          adjustmentPlan,
+          backtestReport,
+        },
+      );
+    } catch (error) {
+      emailError = error.message;
+      console.log(`Warning email failed but monitoring will continue: ${emailError}`);
+    }
   }
+
+  await publishMonitorStatus(config, record, standingReport, {
+    kind: "warning",
+    warningMinutes,
+    operationalSnapshot,
+    plotSnapshots,
+    policySnapshot,
+    metricCatalog,
+    watchlist,
+    metricAlerts: warningAlerts,
+    adjustmentPlan,
+    backtestReport,
+    emailSent,
+    emailError,
+  });
 
   console.log(`${warningMinutes}-minute warning email summary:`);
   console.log(`Email sent: ${emailSent ? "yes" : "no"}`);

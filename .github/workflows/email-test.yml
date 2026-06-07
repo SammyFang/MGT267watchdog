@@ -41,6 +41,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          EMAIL_ENABLED: ${{ vars.EMAIL_ENABLED || 'false' }}
 
       - name: Upload email output
         if: always()

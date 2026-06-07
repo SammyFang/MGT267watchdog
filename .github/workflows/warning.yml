@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: supply-chain-warning
@@ -47,6 +48,9 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          EMAIL_ENABLED: ${{ vars.EMAIL_ENABLED || 'false' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ISSUE_NOTIFICATIONS: "true"
 
       - name: Upload warning output
         if: always()
