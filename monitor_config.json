@@ -354,7 +354,7 @@
     "wecom": {
       "enabled": true,
       "webhook_url_env": "WECOM_WEBHOOK_URL",
-      "notify_mode": "alerts"
+      "notify_mode": "alerts_or_day_change"
     }
   },
   "output": {

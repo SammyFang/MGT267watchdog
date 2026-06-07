@@ -904,6 +904,20 @@ function ratioMetric(value) {
   return value.toFixed(3).replace(/\.?0+$/, "");
 }
 
+function backtestDayLabel(value, fallback = "") {
+  if (!Number.isFinite(value)) {
+    return fallback || "";
+  }
+
+  const rounded = Math.round(value);
+
+  if (Math.abs(value - rounded) < 0.001) {
+    return formatNumber(rounded, 0);
+  }
+
+  return value.toFixed(3).replace(/\.?0+$/, "");
+}
+
 function seriesPoints(plotSnapshots, sourceId, seriesName) {
   const plot = (plotSnapshots || []).find((item) => item.id === sourceId);
 
@@ -1482,8 +1496,11 @@ function buildBacktestReport(
       ? lostDemandThreshold
       : 0,
     observations: rows.length,
-    day_start: rows[0]?.dayRaw || "",
-    day_end: rows[rows.length - 1]?.dayRaw || "",
+    day_start: backtestDayLabel(rows[0]?.day, rows[0]?.dayRaw || ""),
+    day_end: backtestDayLabel(
+      rows[rows.length - 1]?.day,
+      rows[rows.length - 1]?.dayRaw || "",
+    ),
     latest: summarizeBacktestRows(rows),
     recommendations,
     tests,
@@ -4087,6 +4104,168 @@ function statusPageUrl() {
   return optionalEnv("STATUS_PAGE_URL", "");
 }
 
+function dayNumberFromValue(value) {
+  const parsed = Number(String(value ?? "").replace(/,/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function gamePhaseLabel(config, record) {
+  const rules = gameRules(config);
+  const remaining = remainingGameDays(config, record);
+
+  if (!Number.isFinite(remaining)) {
+    return "unknown";
+  }
+
+  if (remaining <= 0) {
+    return "ended";
+  }
+
+  if (remaining <= Number(rules.truck_lead_days || 7)) {
+    return "final lead-time window";
+  }
+
+  if (remaining <= 30) {
+    return "final month";
+  }
+
+  if (remaining <= Number(rules.capacity_expansion_lead_days || 90)) {
+    return "endgame capacity cutoff";
+  }
+
+  if (remaining <= Number(rules.capacity_expansion_lead_days || 90) + 30) {
+    return "late game";
+  }
+
+  return "normal operations";
+}
+
+function buildDayChangeReview(config, previousState, record, metricCatalog, adjustmentPlan, backtestReport) {
+  const currentDay = dashboardDayNumber(record);
+  const previousDay = dayNumberFromValue(
+    previousState.last_dashboard_day ?? previousState.last_day_change_dashboard_day,
+  );
+  const changed =
+    Number.isFinite(currentDay) &&
+    (!Number.isFinite(previousDay) || currentDay !== previousDay);
+  const advancedBy =
+    Number.isFinite(currentDay) && Number.isFinite(previousDay)
+      ? currentDay - previousDay
+      : null;
+  const rules = gameRules(config);
+  const remainingDays = remainingGameDays(config, record);
+  const targets = coverageTargets(config, record);
+  const latest = backtestReport?.latest || {};
+  const daysOfCover =
+    metricRaw(metricCatalog, "derived:days_of_cover") ||
+    ratioMetric(latest.days_of_cover) ||
+    "n/a";
+  const lostDemand =
+    metricRaw(metricCatalog, "derived:calopeia_served_lost_demand") ||
+    String(latest.lost_demand ?? "n/a");
+  const demand =
+    metricRaw(metricCatalog, "derived:calopeia_served_demand") ||
+    String(latest.demand ?? "n/a");
+  const shipments =
+    metricRaw(metricCatalog, "derived:calopeia_served_shipments") ||
+    String(latest.shipments ?? "n/a");
+  const shipmentRatio =
+    metricRaw(metricCatalog, "derived:shipment_to_demand_ratio") ||
+    ratioMetric(latest.shipment_to_demand_ratio) ||
+    "n/a";
+  const cashLead =
+    metricRaw(metricCatalog, "derived:cash_lead_percent_vs_nearest") || "n/a";
+  const maxChange = config.policy_apply?.max_change_per_apply ||
+    config.auto_adjust?.max_change_per_run ||
+    {};
+  const candidateActions = (adjustmentPlan?.recommendations || [])
+    .filter((item) => !["hold", "review"].includes(String(item.direction || "").toLowerCase()))
+    .slice(0, 4)
+    .map((item) => `${item.area}.${item.parameter}: ${item.baseline || "n/a"} -> ${item.suggested || "n/a"} (${item.direction || "n/a"})`);
+  const backtestCandidates = (backtestReport?.recommendations || [])
+    .slice(0, 4)
+    .map((item) =>
+      `${item.indicator}: ${item.operator} ${item.suggested_threshold}; precision=${
+        Number.isFinite(item.precision) ? percentMetric(item.precision * 100) : "n/a"
+      }, recall=${Number.isFinite(item.recall) ? percentMetric(item.recall * 100) : "n/a"}`,
+    );
+  const guardrails = [
+    `Max policy move per apply: order_point +/-${maxChange.order_point ?? 25}, quantity +/-${maxChange.quantity ?? 25}; avoid reacting to one noisy day.`,
+    `Do not lower order point/quantity when served lost demand is above 0 or cover is below ${ratioMetric(targets.min)} days.`,
+    `Do not raise production aggressively when cover is above ${ratioMetric(targets.max)} days and lost demand is 0; trim or increase gradually to avoid bullwhip.`,
+    `Capacity takes ${rules.capacity_expansion_lead_days} days and cannot be retired; avoid new capacity in ${gamePhaseLabel(config, record)} unless backtest shows persistent lost demand.`,
+    `Game ends on day ${rules.end_day}; remaining inventory and capacity are obsolete after that date.`,
+  ];
+
+  return {
+    enabled: true,
+    changed,
+    previous_day: Number.isFinite(previousDay) ? previousDay : null,
+    current_day: Number.isFinite(currentDay) ? currentDay : null,
+    advanced_by: Number.isFinite(advancedBy) ? advancedBy : null,
+    remaining_days: remainingDays,
+    end_day: rules.end_day,
+    phase: gamePhaseLabel(config, record),
+    posture: adjustmentPlan?.posture || "n/a",
+    latest: {
+      warehouse_inventory: record.warehouseInventory,
+      demand,
+      shipments,
+      lost_demand: lostDemand,
+      days_of_cover: daysOfCover,
+      shipment_to_demand_ratio: shipmentRatio,
+      cash_lead_percent_vs_nearest: cashLead,
+    },
+    backtest: {
+      observations: backtestReport?.observations ?? 0,
+      window: backtestReport?.day_start && backtestReport?.day_end
+        ? `${backtestReport.day_start} to ${backtestReport.day_end}`
+        : "n/a",
+      horizon_days: backtestReport?.horizon_days ?? "n/a",
+      recommendations: backtestCandidates,
+    },
+    action_candidates: candidateActions,
+    guardrails,
+  };
+}
+
+function buildDayChangeReviewMarkdown(review) {
+  if (!review?.enabled) {
+    return "";
+  }
+
+  const changeText = review.changed
+    ? `changed from ${review.previous_day ?? "n/a"} to ${review.current_day ?? "n/a"}`
+    : `unchanged at ${review.current_day ?? "n/a"}`;
+
+  return [
+    "### Simulated Day Review",
+    "",
+    `- Day status: ${changeText}${Number.isFinite(review.advanced_by) ? ` (${review.advanced_by >= 0 ? "+" : ""}${review.advanced_by})` : ""}`,
+    `- Game clock: day ${review.current_day ?? "n/a"} / ${review.end_day}; remaining days ${review.remaining_days ?? "n/a"}; phase ${review.phase}`,
+    `- Posture: ${review.posture}`,
+    `- Latest operations: inventory ${review.latest.warehouse_inventory ?? "n/a"}, demand ${review.latest.demand}, shipments ${review.latest.shipments}, lost demand ${review.latest.lost_demand}, cover ${review.latest.days_of_cover}, shipment/demand ${review.latest.shipment_to_demand_ratio}`,
+    `- Cash lead vs nearest: ${review.latest.cash_lead_percent_vs_nearest}`,
+    "",
+    review.action_candidates.length
+      ? `Action candidates: ${review.action_candidates.join("; ")}`
+      : "Action candidates: none; hold current policy unless alerts worsen.",
+    review.backtest.recommendations.length
+      ? `Backtest thresholds: ${review.backtest.recommendations.join("; ")}`
+      : `Backtest thresholds: no strong historical threshold in ${review.backtest.window}.`,
+    `Backtest window: ${review.backtest.window}; observations ${review.backtest.observations}; horizon ${review.backtest.horizon_days} days.`,
+    "",
+    "Bullwhip / endgame guardrails:",
+    ...review.guardrails.map((item) => `- ${item}`),
+    "",
+  ].join("\n");
+}
+
+function buildDayChangeReviewLines(review) {
+  const markdown = buildDayChangeReviewMarkdown(review).trim();
+  return markdown ? ["", ...markdown.split(/\n/)] : [];
+}
+
 function buildWatchdogMarkdownSummary(config, record, standingReport, options = {}) {
   const kind = options.kind === "warning" ? "15-minute warning check" : "hourly monitor";
   const watchlist = options.watchlist || [];
@@ -4117,6 +4296,7 @@ function buildWatchdogMarkdownSummary(config, record, standingReport, options = 
     gameUrl ? `- Game entry: ${gameUrl}` : "",
     runUrl ? `- GitHub run: ${runUrl}` : "",
     "",
+    buildDayChangeReviewMarkdown(options.dayChangeReview),
     "### Alerts",
     alerts.length
       ? "| Severity | Alert | Current | Rule | Message |\n| --- | --- | ---: | --- | --- |\n" +
@@ -4208,6 +4388,27 @@ function compactStandingRows(standingReport = {}) {
   ]);
 }
 
+function dayChangeRows(review = {}) {
+  if (!review.enabled) {
+    return [];
+  }
+
+  return [
+    ["Day changed", review.changed ? "yes" : "no"],
+    ["Previous day", review.previous_day ?? "n/a"],
+    ["Current day", review.current_day ?? "n/a"],
+    ["Advanced by", Number.isFinite(review.advanced_by) ? review.advanced_by : "n/a"],
+    ["Remaining days", review.remaining_days ?? "n/a"],
+    ["Phase", review.phase || "n/a"],
+    ["Posture", review.posture || "n/a"],
+    ["Inventory", review.latest?.warehouse_inventory ?? "n/a"],
+    ["Demand / shipments", `${review.latest?.demand ?? "n/a"} / ${review.latest?.shipments ?? "n/a"}`],
+    ["Lost demand", review.latest?.lost_demand ?? "n/a"],
+    ["Days of cover", review.latest?.days_of_cover ?? "n/a"],
+    ["Backtest window", review.backtest?.window || "n/a"],
+  ];
+}
+
 function buildStatusPageHtml(config, record, standingReport, options = {}) {
   const alerts = options.metricAlerts || [];
   const alertCount = alerts.length;
@@ -4271,6 +4472,9 @@ function buildStatusPageHtml(config, record, standingReport, options = {}) {
     runUrl ? `<a href="${escapeHtml(runUrl)}" class="secondary">Current Run</a>` : "",
     repoUrl ? `<a href="${escapeHtml(repoUrl)}/actions" class="secondary">Actions</a>` : "",
     "</div>",
+    "<section><h2>Simulated Day Review</h2>",
+    statusPageTable(["Metric", "Value"], dayChangeRows(options.dayChangeReview)),
+    "</section>",
     "<section><h2>Alerts</h2>",
     statusPageTable(["Severity", "Alert", "Current", "Rule", "Message"], compactAlertRows(alerts)),
     "</section>",
@@ -4304,6 +4508,7 @@ function statusJsonPayload(record, standingReport, options = {}) {
     warehouse_inventory_day: record.warehouseDay,
     email_sent: Boolean(options.emailSent),
     email_error: options.emailError || "",
+    day_change_review: options.dayChangeReview || null,
     alerts: options.metricAlerts || [],
     adjustment_plan: options.adjustmentPlan || null,
     standing: standingReport.rows || [],
@@ -4364,8 +4569,14 @@ function shouldSendWecom(config, options = {}) {
 
   const mode = optionalEnv("WECOM_NOTIFY_MODE", cfg.notify_mode || "alerts").toLowerCase();
   const alerts = options.metricAlerts || [];
+  const dayChanged = options.dayChangeReview?.changed === true;
 
-  return mode === "all" || alerts.length > 0;
+  return (
+    mode === "all" ||
+    (mode === "day_change" && dayChanged) ||
+    (mode === "alerts_or_day_change" && (alerts.length > 0 || dayChanged)) ||
+    (mode === "alerts" && alerts.length > 0)
+  );
 }
 
 function buildWecomMarkdown(config, record, standingReport, options = {}) {
@@ -4374,6 +4585,7 @@ function buildWecomMarkdown(config, record, standingReport, options = {}) {
     ? alerts.map((alert) => `> ${alert.severity || "alert"} ${alert.label}: ${alert.currentRaw || alert.current || "n/a"} ${alert.operator || ""} ${alert.thresholdRaw || ""}`).join("\n")
     : "> No active alerts";
   const topRecommendation = (options.adjustmentPlan?.recommendations || [])[0];
+  const review = options.dayChangeReview || {};
   const pageUrl = statusPageUrl();
   const issueUrl = options.githubIssueUrl || "";
   const runUrl = actionsRunUrl();
@@ -4383,6 +4595,9 @@ function buildWecomMarkdown(config, record, standingReport, options = {}) {
       `**MGT267 Watchdog ${options.kind === "warning" ? "15m" : "hourly"}**`,
       `Team ${record.targetTeam || "n/a"} rank ${record.targetRank ?? "n/a"} cash ${record.targetCash || "n/a"} day ${record.dashboardDay || "n/a"}`,
       `Warehouse inventory: ${record.warehouseInventory ?? "n/a"}`,
+      review.enabled
+        ? `Sim day review: ${review.changed ? "changed" : "unchanged"} ${review.previous_day ?? "n/a"} -> ${review.current_day ?? "n/a"}; remaining ${review.remaining_days ?? "n/a"}; phase ${review.phase || "n/a"}`
+        : "",
       "",
       alertLine,
       topRecommendation
@@ -5716,6 +5931,7 @@ function buildReportText(config, record, standingReport, options = {}) {
       options.adjustmentPlan,
       options.policySnapshot || [],
     ),
+    ...buildDayChangeReviewLines(options.dayChangeReview),
     ...buildMetricAlertLines(options.metricAlerts),
     ...buildBacktestLines(options.backtestReport),
     ...buildOperationalLines(options.operationalSnapshot),
@@ -6153,6 +6369,60 @@ function buildBacktestHtml(report) {
   ].join("");
 }
 
+function buildDayChangeReviewHtml(review) {
+  if (!review?.enabled) {
+    return "";
+  }
+
+  const changeText = review.changed
+    ? `changed from ${review.previous_day ?? "n/a"} to ${review.current_day ?? "n/a"}`
+    : `unchanged at ${review.current_day ?? "n/a"}`;
+  const rows = [
+    ["Day status", changeText],
+    ["Game clock", `day ${review.current_day ?? "n/a"} / ${review.end_day}; remaining ${review.remaining_days ?? "n/a"}; phase ${review.phase || "n/a"}`],
+    ["Posture", review.posture || "n/a"],
+    ["Latest operations", `inventory ${review.latest?.warehouse_inventory ?? "n/a"}, demand ${review.latest?.demand ?? "n/a"}, shipments ${review.latest?.shipments ?? "n/a"}, lost demand ${review.latest?.lost_demand ?? "n/a"}, cover ${review.latest?.days_of_cover ?? "n/a"}`],
+    ["Cash lead", review.latest?.cash_lead_percent_vs_nearest || "n/a"],
+    ["Backtest window", `${review.backtest?.window || "n/a"}; observations ${review.backtest?.observations ?? "n/a"}; horizon ${review.backtest?.horizon_days ?? "n/a"} days`],
+  ];
+  const actionItems = review.action_candidates?.length
+    ? review.action_candidates
+    : ["No policy changes recommended; hold current policy unless alerts worsen."];
+  const backtestItems = review.backtest?.recommendations?.length
+    ? review.backtest.recommendations
+    : [`No strong historical threshold in ${review.backtest?.window || "the current window"}.`];
+
+  return [
+    '<div style="padding:0 22px 18px;">',
+    '<div style="font-size:16px;font-weight:700;margin:4px 0 10px;color:#0f172a;">Simulated Day Review</div>',
+    '<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #d8dee9;border-radius:8px;overflow:hidden;font-size:13px;margin-bottom:10px;">',
+    '<tbody>',
+    ...rows.map(([label, value]) =>
+      [
+        '<tr>',
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;background:#f8fafc;font-weight:700;width:28%;">${escapeHtml(label)}</td>`,
+        `<td style="padding:8px;border-bottom:1px solid #e2e8f0;">${escapeHtml(value)}</td>`,
+        '</tr>',
+      ].join(""),
+    ),
+    '</tbody></table>',
+    '<div style="border:1px solid #bfdbfe;border-radius:8px;background:#eff6ff;padding:10px 12px;margin-bottom:10px;color:#1e3a8a;font-size:13px;line-height:1.45;">',
+    '<div style="font-weight:700;margin-bottom:5px;">Action candidates</div>',
+    '<ol style="margin:0 0 0 20px;padding:0;">',
+    ...actionItems.map((item) => `<li>${escapeHtml(item)}</li>`),
+    '</ol></div>',
+    '<div style="border:1px solid #d8dee9;border-radius:8px;background:#f8fafc;padding:10px 12px;color:#334155;font-size:13px;line-height:1.45;">',
+    '<div style="font-weight:700;margin-bottom:5px;">Backtest and guardrails</div>',
+    '<ul style="margin:0 0 8px 18px;padding:0;">',
+    ...backtestItems.map((item) => `<li>${escapeHtml(item)}</li>`),
+    '</ul>',
+    '<ul style="margin:0 0 0 18px;padding:0;">',
+    ...(review.guardrails || []).map((item) => `<li>${escapeHtml(item)}</li>`),
+    '</ul></div>',
+    '</div>',
+  ].join("");
+}
+
 function buildEmailFooterHtml(config) {
   const footer = config.email.footer || {};
   const text = footer.text || "Developed by Yung-Sian Fang";
@@ -6213,6 +6483,7 @@ function buildReportHtml(config, record, standingReport, options = {}) {
     "</tr>",
     "</table>",
     buildGameLinkHtml(config),
+    buildDayChangeReviewHtml(options.dayChangeReview),
     buildWatchlistHtml(options.watchlist),
     buildRecommendationsHtml(options.recommendations),
     buildAdjustmentPlanHtml(options.adjustmentPlan),
@@ -6631,6 +6902,14 @@ async function runOnce(config) {
     plotSnapshots,
     policySnapshot,
   );
+  const dayChangeReview = buildDayChangeReview(
+    config,
+    previousState,
+    record,
+    metricCatalog,
+    adjustmentPlan,
+    backtestReport,
+  );
   const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
   let emailSent = false;
   let emailError = "";
@@ -6646,6 +6925,7 @@ async function runOnce(config) {
         adjustmentPlan,
         policySnapshot,
         backtestReport,
+        dayChangeReview,
       });
     } catch (error) {
       emailError = error.message;
@@ -6702,6 +6982,7 @@ async function runOnce(config) {
     adjustmentPlan,
     policySnapshot,
     backtestReport,
+    dayChangeReview,
     emailSent,
     emailError,
   });
@@ -6715,6 +6996,7 @@ async function runOnce(config) {
         last_cash: dashboard.cash,
         last_cash_number: record.cashNumber,
         last_dashboard_day: dashboard.day,
+        last_dashboard_day_number: dashboardDayNumber(record),
         last_warehouse_inventory: record.warehouseInventory,
         last_warehouse_day: inventoryTable.latestWarehouse.day,
         last_target_team: standingReport.target.team,
@@ -6736,6 +7018,13 @@ async function runOnce(config) {
           latest: backtestReport.latest,
           recommendations: backtestReport.recommendations,
         },
+        last_day_change_review_at: dayChangeReview.changed
+          ? checkedAt
+          : previousState.last_day_change_review_at || null,
+        last_day_change_dashboard_day: dayChangeReview.changed
+          ? record.dashboardDay
+          : previousState.last_day_change_dashboard_day || null,
+        last_day_change_review: dayChangeReview,
         last_policy_pages: policySnapshot,
         last_email_sent_at: emailSent
           ? checkedAt
@@ -6753,6 +7042,9 @@ async function runOnce(config) {
   console.log(`Checked at: ${record.checkedAtLocal} (${config.crawl.timezone})`);
   console.log(`Cash: ${dashboard.cash}`);
   console.log(`Dashboard day: ${dashboard.day}`);
+  console.log(`Sim day changed: ${dayChangeReview.changed ? "yes" : "no"}`);
+  console.log(`Previous dashboard day: ${dayChangeReview.previous_day ?? "n/a"}`);
+  console.log(`Remaining game days: ${dayChangeReview.remaining_days ?? "n/a"}`);
   console.log(`Target team: ${standingReport.target.team}`);
   console.log(`Target rank: ${standingReport.target.rank}`);
   console.log(`Target cash: ${standingReport.target.cash}`);
@@ -6839,13 +7131,19 @@ async function sendTestEmails(config) {
 
 async function sendWarningEmail(config) {
   const warningMinutes = Number(config.monitor.warning_minutes || 15);
+  const statePath = path.resolve(process.cwd(), config.output.latest_json);
   const dataWorkbookPath = path.resolve(
     process.cwd(),
     config.output.data_workbook_xlsx,
   );
+  ensureDir(path.resolve(process.cwd(), config.output.state_dir));
+  const previousState = readJson(statePath, {});
   const { dashboard, inventoryTable, plotSnapshots, standingReport, policySnapshot } =
     await crawl(config);
-  const operationalSnapshot = buildOperationalSnapshot(plotSnapshots, {});
+  const operationalSnapshot = buildOperationalSnapshot(
+    plotSnapshots,
+    previousState.last_operational_metrics || {},
+  );
   const record = createRecord(config, dashboard, inventoryTable, standingReport);
   const metricCatalog = buildMetricCatalog(
     config,
@@ -6870,6 +7168,14 @@ async function sendWarningEmail(config) {
     plotSnapshots,
     policySnapshot,
   );
+  const dayChangeReview = buildDayChangeReview(
+    config,
+    previousState,
+    record,
+    metricCatalog,
+    adjustmentPlan,
+    backtestReport,
+  );
   const backtestOutputs = await writeBacktestOutputs(config, backtestReport);
   const workbookWritten = await writeDataWorkbookFile(
     config,
@@ -6889,7 +7195,7 @@ async function sendWarningEmail(config) {
   let emailSent = false;
   let emailError = "";
 
-  if (warningAlerts.length > 0) {
+  if (warningAlerts.length > 0 || dayChangeReview.changed) {
     try {
       emailSent = await sendReportEmail(
         config,
@@ -6906,6 +7212,7 @@ async function sendWarningEmail(config) {
           metricAlerts: warningAlerts,
           adjustmentPlan,
           backtestReport,
+          dayChangeReview,
         },
       );
     } catch (error) {
@@ -6925,15 +7232,69 @@ async function sendWarningEmail(config) {
     metricAlerts: warningAlerts,
     adjustmentPlan,
     backtestReport,
+    dayChangeReview,
     emailSent,
     emailError,
   });
+  fs.writeFileSync(
+    statePath,
+    `${JSON.stringify(
+      {
+        ...previousState,
+        last_run_at: record.checkedAt,
+        last_run_at_local: record.checkedAtLocal,
+        last_cash: dashboard.cash,
+        last_cash_number: record.cashNumber,
+        last_dashboard_day: dashboard.day,
+        last_dashboard_day_number: dashboardDayNumber(record),
+        last_warehouse_inventory: record.warehouseInventory,
+        last_warehouse_day: inventoryTable.latestWarehouse.day,
+        last_target_team: standingReport.target.team,
+        last_target_rank: standingReport.target.rank,
+        last_target_cash: standingReport.target.cash,
+        last_target_cash_number: standingReport.target.cashNumber,
+        last_alerts: warningAlerts,
+        last_operational_metrics: operationalSnapshot.metrics,
+        last_adjustment_plan: adjustmentPlan,
+        last_backtest: {
+          generated_at: backtestReport.generated_at,
+          data_source: backtestReport.data_source,
+          local_dependency: backtestReport.local_dependency,
+          observations: backtestReport.observations,
+          day_start: backtestReport.day_start,
+          day_end: backtestReport.day_end,
+          latest: backtestReport.latest,
+          recommendations: backtestReport.recommendations,
+        },
+        last_day_change_review_at: dayChangeReview.changed
+          ? record.checkedAt
+          : previousState.last_day_change_review_at || null,
+        last_day_change_dashboard_day: dayChangeReview.changed
+          ? record.dashboardDay
+          : previousState.last_day_change_dashboard_day || null,
+        last_day_change_review: dayChangeReview,
+        last_policy_pages: policySnapshot,
+        last_email_sent_at: emailSent
+          ? record.checkedAt
+          : previousState.last_email_sent_at || null,
+        last_email_sent_at_local: emailSent
+          ? record.checkedAtLocal
+          : previousState.last_email_sent_at_local || null,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
 
   console.log(`${warningMinutes}-minute warning email summary:`);
   console.log(`Email sent: ${emailSent ? "yes" : "no"}`);
   console.log(`Target team: ${record.targetTeam}`);
   console.log(`Target cash: ${record.targetCash}`);
   console.log(`Dashboard day: ${record.dashboardDay}`);
+  console.log(`Sim day changed: ${dayChangeReview.changed ? "yes" : "no"}`);
+  console.log(`Previous dashboard day: ${dayChangeReview.previous_day ?? "n/a"}`);
+  console.log(`Remaining game days: ${dayChangeReview.remaining_days ?? "n/a"}`);
   console.log(`Warehouse inventory: ${record.warehouseInventory}`);
   console.log(`Inventory reference crossed: ${record.inventoryCheckpoint ? "yes" : "no"}`);
   console.log(`Active inventory alert: ${record.inventoryAlert ? "yes" : "no"}`);
