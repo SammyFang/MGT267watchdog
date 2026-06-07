@@ -3032,7 +3032,9 @@ function policyApplyMarkdownSummary(report) {
     ? "DRY RUN ONLY - no game forms were submitted."
     : appliedCount > 0
       ? "GAME UPDATE SUBMITTED."
-      : "NO GAME UPDATE - no accepted changes were submitted.";
+      : report.autopilot?.enabled
+        ? "NO GAME UPDATE - autopilot guardrails blocked submit."
+        : "NO GAME UPDATE - no accepted changes were submitted.";
   const rows = changes.map((item) =>
     [
       item.area,
@@ -3057,6 +3059,9 @@ function policyApplyMarkdownSummary(report) {
     `- Mode: ${report.mode}`,
     `- Confirm: ${report.confirm}`,
     `- Dry run: ${report.dry_run ? "yes" : "no"}`,
+    report.autopilot?.enabled
+      ? `- Autopilot: ${report.autopilot.apply_allowed ? "allowed" : "blocked"}; ${report.autopilot.reason}`
+      : "",
     `- Target: ${report.target_team} rank ${report.target_rank ?? "n/a"} cash ${report.target_cash ?? "n/a"} day ${report.dashboard_day ?? "n/a"}`,
     `- Warehouse inventory: ${report.warehouse_inventory ?? "n/a"}`,
     `- Posture: ${report.posture ?? "n/a"}`,
@@ -3256,6 +3261,108 @@ function validatePolicyChanges(config, changes, context = {}) {
     result.accepted = true;
     return result;
   });
+}
+
+function policyChangeSignature(changes = []) {
+  const parts = changes
+    .filter((change) => change.accepted)
+    .map((change) => {
+      const delta = Number(change.delta);
+      const direction = Number.isFinite(delta)
+        ? delta > 0
+          ? "increase"
+          : delta < 0
+            ? "decrease"
+            : "hold"
+        : String(change.direction || "").toLowerCase();
+      return `${change.area}.${change.parameter}:${direction}`;
+    })
+    .filter(Boolean)
+    .sort();
+
+  return parts.join("|");
+}
+
+function buildAutopilotDecision(config, previousState, record, validated, candidateSet, options = {}) {
+  const autopilot = config.policy_apply?.autopilot || {};
+  const enabled = options.autopilot === true;
+  const envName = autopilot.default_enabled_env || "POLICY_AUTOPILOT_ENABLED";
+  const envText = optionalEnv(envName, "");
+  const envEnabled = envText
+    ? !["0", "false", "no", "off"].includes(envText.toLowerCase())
+    : autopilot.enabled !== false;
+  const accepted = validated.filter((change) => change.accepted);
+  const currentDay = dashboardDayNumber(record);
+  const lastApplyDay = dayNumberFromValue(previousState.last_autopilot_apply_day_number);
+  const signature = policyChangeSignature(accepted);
+  const previousSignature = previousState.last_autopilot_signature || "";
+  const previousCount =
+    previousSignature && previousSignature === signature
+      ? Number(previousState.last_autopilot_signature_count || 0)
+      : 0;
+  const consecutiveCount = signature ? previousCount + 1 : 0;
+  const requiredConfirmations = Math.max(
+    1,
+    Number(autopilot.consecutive_confirmations_required ?? 2) || 2,
+  );
+  const minGameDaysBetweenApply = Math.max(
+    0,
+    Number(autopilot.minimum_game_days_between_apply ?? 1) || 1,
+  );
+  const gameDayGap =
+    Number.isFinite(currentDay) && Number.isFinite(lastApplyDay)
+      ? currentDay - lastApplyDay
+      : null;
+  let applyAllowed = true;
+  let reason = "Autopilot guardrails passed.";
+
+  function block(message) {
+    applyAllowed = false;
+    reason = message;
+  }
+
+  if (!enabled) {
+    block("Autopilot mode is not active for this run.");
+  } else if (!envEnabled) {
+    block(`${envName} disables autopilot.`);
+  } else if (options.dryRun) {
+    block("Dry run requested; no game forms will be submitted.");
+  } else if (candidateSet.conflicts.length > 0) {
+    block("Conflicting recommendations detected.");
+  } else if (accepted.length === 0) {
+    block("No accepted policy changes after guardrails.");
+  } else if (!Number.isFinite(currentDay)) {
+    block("Current dashboard day is unavailable.");
+  } else if (
+    Number.isFinite(lastApplyDay) &&
+    gameDayGap !== null &&
+    gameDayGap < minGameDaysBetweenApply
+  ) {
+    block(`Already applied on day ${lastApplyDay}; minimum spacing is ${minGameDaysBetweenApply} game day(s).`);
+  } else if (!signature) {
+    block("No stable policy-change signature.");
+  } else if (consecutiveCount < requiredConfirmations) {
+    block(`Need ${requiredConfirmations} consecutive matching recommendations; observed ${consecutiveCount}.`);
+  } else if (remainingGameDays(config, record) <= 0) {
+    block("Game has reached or passed the configured end day.");
+  }
+
+  return {
+    enabled,
+    env_name: envName,
+    env_enabled: envEnabled,
+    apply_allowed: applyAllowed,
+    reason,
+    current_signature: signature,
+    previous_signature: previousSignature,
+    consecutive_count: consecutiveCount,
+    consecutive_required: requiredConfirmations,
+    current_day: Number.isFinite(currentDay) ? currentDay : null,
+    last_apply_day: Number.isFinite(lastApplyDay) ? lastApplyDay : null,
+    minimum_game_days_between_apply: minGameDaysBetweenApply,
+    accepted_change_count: accepted.length,
+    stale_run_protection: "Every autopilot run re-crawls the latest game pages immediately before submit; workflow concurrency cancels older in-progress autopilot runs.",
+  };
 }
 
 function policyPageConfig(config, area) {
@@ -4105,7 +4212,13 @@ function statusPageUrl() {
 }
 
 function dayNumberFromValue(value) {
-  const parsed = Number(String(value ?? "").replace(/,/g, ""));
+  const text = String(value ?? "").replace(/,/g, "").trim();
+
+  if (!text) {
+    return null;
+  }
+
+  const parsed = Number(text);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
@@ -7340,9 +7453,12 @@ async function runBacktestOnly(config) {
 
 async function runPolicyApply(config) {
   ensureDir(path.resolve(process.cwd(), config.output.state_dir));
+  const statePath = path.resolve(process.cwd(), config.output.latest_json);
+  const previousState = readJson(statePath, {});
   const mode = optionalEnv("POLICY_APPLY_MODE", "recommended").toLowerCase();
   const confirm = optionalEnv("POLICY_APPLY_CONFIRM", "DRY_RUN").trim();
-  const dryRun = isTruthyEnv("POLICY_APPLY_DRY_RUN") || confirm !== "APPLY";
+  const autopilotRun = isTruthyEnv("POLICY_APPLY_AUTOPILOT");
+  let dryRun = isTruthyEnv("POLICY_APPLY_DRY_RUN") || confirm !== "APPLY";
   const allowShipping =
     isTruthyEnv("POLICY_ALLOW_SHIPPING_METHOD_CHANGE") &&
     config.policy_apply?.allow_shipping_method_change === true;
@@ -7390,6 +7506,22 @@ async function runPolicyApply(config) {
     allowShipping,
   });
   const accepted = validated.filter((change) => change.accepted);
+  const autopilotDecision = buildAutopilotDecision(
+    config,
+    previousState,
+    record,
+    validated,
+    candidateSet,
+    {
+      autopilot: autopilotRun,
+      dryRun,
+    },
+  );
+
+  if (autopilotRun && !autopilotDecision.apply_allowed) {
+    dryRun = true;
+  }
+
   const report = {
     generated_at: checkedAt,
     generated_at_local: localizedTime(checkedAt, config.crawl.timezone),
@@ -7404,13 +7536,18 @@ async function runPolicyApply(config) {
     warehouse_inventory: record.warehouseInventory,
     warehouse_inventory_day: record.warehouseDay,
     posture: adjustmentPlan.posture || "n/a",
+    autopilot: autopilotDecision,
     safety: {
-      approval_required: true,
+      approval_required: !autopilotRun,
       game_updates_enabled: !dryRun,
       allow_shipping_method_change: allowShipping,
       note: dryRun
-        ? "Dry run only; no game forms were submitted."
-        : "Manual approval received; accepted fields were submitted after latest crawl and guardrail checks.",
+        ? autopilotRun
+          ? `Autopilot did not submit game forms: ${autopilotDecision.reason}`
+          : "Dry run only; no game forms were submitted."
+        : autopilotRun
+          ? "Autopilot approved this run after latest crawl, consecutive-signal confirmation, and guardrail checks."
+          : "Manual approval received; accepted fields were submitted after latest crawl and guardrail checks.",
     },
     conflicts: candidateSet.conflicts,
     changes: validated,
@@ -7498,9 +7635,71 @@ async function runPolicyApply(config) {
     "utf8",
   );
 
+  const appliedChanges = report.changes.filter((change) => change.applied);
+  const currentDayNumber = dashboardDayNumber(record);
+  const nextState = {
+    ...previousState,
+    last_policy_apply_run_at: checkedAt,
+    last_policy_apply_run_at_local: report.generated_at_local,
+    last_policy_apply_mode: mode,
+    last_policy_apply_dry_run: dryRun,
+    last_policy_apply_autopilot: autopilotRun,
+    last_policy_apply_applied_count: appliedChanges.length,
+    last_policy_apply_verified_count: report.changes.filter((change) => change.verified).length,
+    last_policy_apply_report: report,
+    last_dashboard_day: dashboard.day,
+    last_dashboard_day_number: currentDayNumber,
+    last_cash: dashboard.cash,
+    last_cash_number: record.cashNumber,
+    last_warehouse_inventory: record.warehouseInventory,
+    last_warehouse_day: inventoryTable.latestWarehouse.day,
+    last_target_team: standingReport.target.team,
+    last_target_rank: standingReport.target.rank,
+    last_target_cash: standingReport.target.cash,
+    last_target_cash_number: standingReport.target.cashNumber,
+    last_adjustment_plan: adjustmentPlan,
+    last_policy_pages: policySnapshot,
+  };
+
+  if (autopilotRun) {
+    nextState.last_autopilot_run_at = checkedAt;
+    nextState.last_autopilot_run_at_local = report.generated_at_local;
+    nextState.last_autopilot_enabled = autopilotDecision.env_enabled;
+    nextState.last_autopilot_apply_allowed = autopilotDecision.apply_allowed;
+    nextState.last_autopilot_reason = autopilotDecision.reason;
+    nextState.last_autopilot_signature = autopilotDecision.current_signature;
+    nextState.last_autopilot_signature_count =
+      autopilotDecision.current_signature
+        ? autopilotDecision.consecutive_count
+        : 0;
+    nextState.last_autopilot_signature_day_number =
+      Number.isFinite(currentDayNumber) ? currentDayNumber : null;
+
+    if (appliedChanges.length > 0 && Number.isFinite(currentDayNumber)) {
+      nextState.last_autopilot_apply_at = checkedAt;
+      nextState.last_autopilot_apply_at_local = report.generated_at_local;
+      nextState.last_autopilot_apply_day_number = currentDayNumber;
+      nextState.last_autopilot_apply_signature =
+        autopilotDecision.current_signature;
+    }
+  }
+
+  fs.writeFileSync(
+    statePath,
+    `${JSON.stringify(nextState, null, 2)}\n`,
+    "utf8",
+  );
+
   console.log("Policy apply summary:");
   console.log(`Mode: ${mode}`);
   console.log(`Dry run: ${dryRun ? "yes" : "no"}`);
+  console.log(`Autopilot: ${autopilotRun ? "yes" : "no"}`);
+  if (autopilotRun) {
+    console.log(`Autopilot decision: ${autopilotDecision.apply_allowed ? "allow" : "block"} - ${autopilotDecision.reason}`);
+    console.log(`Autopilot signature: ${autopilotDecision.current_signature || "n/a"}`);
+    console.log(`Autopilot confirmations: ${autopilotDecision.consecutive_count}/${autopilotDecision.consecutive_required}`);
+    console.log(`Last autopilot apply day: ${autopilotDecision.last_apply_day ?? "n/a"}`);
+  }
   console.log(`Target team: ${record.targetTeam}`);
   console.log(`Target cash: ${record.targetCash}`);
   console.log(`Dashboard day: ${record.dashboardDay}`);

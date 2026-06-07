@@ -304,6 +304,14 @@
     "enabled": true,
     "mode": "approval_required",
     "workflow_url": "https://github.com/SammyFang/MGT267watchdog/actions/workflows/apply-policy.yml",
+    "autopilot": {
+      "enabled": true,
+      "schedule_minutes": 5,
+      "consecutive_confirmations_required": 2,
+      "minimum_game_days_between_apply": 1,
+      "default_enabled_env": "POLICY_AUTOPILOT_ENABLED",
+      "block_when_no_latest_state": false
+    },
     "allow_shipping_method_change": false,
     "max_numeric_changes_per_run": 4,
     "max_change_per_apply": {
