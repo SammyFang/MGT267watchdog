@@ -266,9 +266,9 @@
     "mode": "research_only",
     "allow_game_updates": false,
     "targets": {
-      "days_of_cover_min": 2,
-      "days_of_cover_max": 5,
-      "days_of_cover_target": 3,
+      "days_of_cover_min": 3,
+      "days_of_cover_max": 6,
+      "days_of_cover_target": 4,
       "warehouse_inventory_low": 0,
       "warehouse_inventory_high": null,
       "lost_demand_max": 0,

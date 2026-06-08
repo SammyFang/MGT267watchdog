@@ -2129,6 +2129,15 @@ function gameRules(config) {
   };
 }
 
+function optionalFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function dashboardDayNumber(record) {
   const value = Number(String(record.dashboardDay ?? "").replace(/,/g, ""));
   return Number.isFinite(value) ? value : null;
@@ -2394,7 +2403,7 @@ function buildAutoAdjustmentPlan(
   const daysMax = coverTargets.max;
   const daysTarget = coverTargets.target;
   const inventoryLow = Number(targets.warehouse_inventory_low ?? 50);
-  const inventoryHigh = Number(targets.warehouse_inventory_high);
+  const inventoryHigh = optionalFiniteNumber(targets.warehouse_inventory_high);
   const lostDemandMax = Number(targets.lost_demand_max ?? 0);
   const shipmentRatioMin = Number(targets.shipment_to_demand_ratio_min ?? 0.9);
   const wipRatioMax = Number(targets.wip_to_demand_ratio_max ?? 3);
@@ -2413,7 +2422,7 @@ function buildAutoAdjustmentPlan(
   const excessCoverage =
     (Number.isFinite(daysOfCover) && daysOfCover > daysMax) ||
     (servedRegionCount <= 1 &&
-      Number.isFinite(inventoryHigh) &&
+      inventoryHigh !== null &&
       record.warehouseInventory >= inventoryHigh);
   const shortageRisk =
     (Number.isFinite(lostDemand) && lostDemand > lostDemandMax) ||
@@ -2660,6 +2669,14 @@ function buildAutoAdjustmentPlan(
       orderPointStep,
       "Warehouse policy appears stable against current demand and inventory.",
     );
+    addNumericPolicy(
+      "warehouse",
+      "quantity",
+      warehouse.quantity,
+      "hold",
+      quantityStep,
+      "Warehouse replenishment quantity appears stable against current demand and inventory.",
+    );
   }
 
   if (shipmentBelowDemand && !shortageRisk) {
@@ -2694,7 +2711,7 @@ function buildAutoAdjustmentPlan(
   );
   const cashLeadThreshold = Number(cashLeadRule?.threshold ?? 5);
 
-  if (Number.isFinite(cashLead) && cashLead < cashLeadThreshold) {
+  if (Number.isFinite(cashLead) && cashLead > 0 && cashLead < cashLeadThreshold) {
     addRecommendation({
       area: "cash",
       parameter: "risk_posture",
@@ -2704,6 +2721,17 @@ function buildAutoAdjustmentPlan(
       urgency: "medium",
       confidence: "medium",
       reason: `Cash lead over the nearest competitor is ${formatMetricNumber(cashLead, "%")}; prefer smaller policy moves until lead improves.`,
+    });
+  } else if (Number.isFinite(cashLead) && cashLead < 0) {
+    addRecommendation({
+      area: "cash",
+      parameter: "risk_posture",
+      baselineValue: "trailing",
+      suggestedValue: "service_recovery",
+      direction: "protect_service",
+      urgency: "high",
+      confidence: "medium",
+      reason: `Cash trails the nearest competitor by ${formatMetricNumber(Math.abs(cashLead), "%")}; prioritize eliminating lost demand and stabilizing cover before cutting inventory further.`,
     });
   }
 
