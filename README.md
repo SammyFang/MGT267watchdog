@@ -106,7 +106,7 @@ curl -X POST \
   }'
 ```
 
-For custom values, use `apply_mode=custom` and include only the fields you want to override. Blank fields keep the latest guarded recommendation.
+For custom values, use `apply_mode=custom` and put only the overrides you want in `custom_json`. Omitted fields keep the latest guarded recommendation.
 
 Guardrails:
 
@@ -120,35 +120,29 @@ Guardrails:
 - Increases are blocked when served cover is already above the dynamic maximum and no lost demand is present.
 - Shipping method changes are blocked unless both `policy_apply.allow_shipping_method_change=true` and the workflow input `allow_shipping_method_change=true`.
 
-Custom mode can set these fields manually, with the same guardrails:
+Custom JSON supports nested form:
 
-- `factory_order_point`
-- `factory_quantity`
-- `factory_shipping_method`
-- `factory_sorange_order_point`
-- `factory_sorange_quantity`
-- `factory_sorange_shipping_method`
-- `factory_tyran_order_point`
-- `factory_tyran_quantity`
-- `factory_tyran_shipping_method`
-- `factory_entworpe_order_point`
-- `factory_entworpe_quantity`
-- `factory_entworpe_shipping_method`
-- `factory_fardo_order_point`
-- `factory_fardo_quantity`
-- `factory_fardo_shipping_method`
-- `warehouse_order_point`
-- `warehouse_quantity`
-- `warehouse_shipping_method`
-- `warehouse_sorange_order_point`
-- `warehouse_sorange_quantity`
-- `warehouse_sorange_shipping_method`
-- `warehouse_tyran_order_point`
-- `warehouse_tyran_quantity`
-- `warehouse_tyran_shipping_method`
-- `warehouse_entworpe_order_point`
-- `warehouse_entworpe_quantity`
-- `warehouse_entworpe_shipping_method`
+```json
+{
+  "factory": { "order_point": 550, "quantity": 332 },
+  "warehouse": { "order_point": 550, "quantity": 332 },
+  "factory_sorange": { "order_point": 950, "quantity": 575 },
+  "warehouse_sorange": { "order_point": 950, "quantity": 575 }
+}
+```
+
+It also supports flat keys such as:
+
+```json
+{
+  "factory_order_point": 550,
+  "warehouse_sorange_quantity": 575
+}
+```
+
+Supported areas are `factory`, `factory_sorange`, `factory_tyran`, `factory_entworpe`, `factory_fardo`, `warehouse`, `warehouse_sorange`, `warehouse_tyran`, and `warehouse_entworpe`.
+
+Supported fields are `order_point`, `quantity`, and `shipping_method`. Shipping method still requires both config and workflow confirmation.
 
 Outputs:
 

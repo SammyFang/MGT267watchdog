@@ -13,7 +13,7 @@ on:
           - APPLY
         default: "DRY_RUN"
       apply_mode:
-        description: "recommended uses latest safe values. custom starts from latest safe values and applies optional overrides below."
+        description: "recommended uses latest safe values. custom applies optional custom_json overrides."
         required: true
         type: choice
         options:
@@ -28,114 +28,10 @@ on:
           - "false"
           - "true"
         default: "false"
-      factory_order_point:
-        description: "Optional custom override. Blank uses the latest recommended value."
+      custom_json:
+        description: "Optional JSON overrides, e.g. {\"factory_sorange\":{\"order_point\":950}}"
         required: false
-        default: ""
-      factory_quantity:
-        description: "Optional custom override. Blank uses the latest recommended value."
-        required: false
-        default: ""
-      factory_shipping_method:
-        description: "Optional custom override. Blank uses latest recommendation; shipping changes are blocked unless enabled in config."
-        required: false
-        default: ""
-      warehouse_order_point:
-        description: "Optional custom override. Blank uses the latest recommended value."
-        required: false
-        default: ""
-      warehouse_quantity:
-        description: "Optional custom override. Blank uses the latest recommended value."
-        required: false
-        default: ""
-      warehouse_shipping_method:
-        description: "Optional custom override. Blank uses latest recommendation; shipping changes are blocked unless enabled in config."
-        required: false
-        default: ""
-      factory_sorange_order_point:
-        description: "Optional custom override for factory to Sorange order point."
-        required: false
-        default: ""
-      factory_sorange_quantity:
-        description: "Optional custom override for factory to Sorange quantity."
-        required: false
-        default: ""
-      factory_sorange_shipping_method:
-        description: "Optional custom override for factory to Sorange shipping method."
-        required: false
-        default: ""
-      factory_tyran_order_point:
-        description: "Optional custom override for factory to Tyran order point."
-        required: false
-        default: ""
-      factory_tyran_quantity:
-        description: "Optional custom override for factory to Tyran quantity."
-        required: false
-        default: ""
-      factory_tyran_shipping_method:
-        description: "Optional custom override for factory to Tyran shipping method."
-        required: false
-        default: ""
-      factory_entworpe_order_point:
-        description: "Optional custom override for factory to Entworpe order point."
-        required: false
-        default: ""
-      factory_entworpe_quantity:
-        description: "Optional custom override for factory to Entworpe quantity."
-        required: false
-        default: ""
-      factory_entworpe_shipping_method:
-        description: "Optional custom override for factory to Entworpe shipping method."
-        required: false
-        default: ""
-      factory_fardo_order_point:
-        description: "Optional custom override for factory to Fardo order point."
-        required: false
-        default: ""
-      factory_fardo_quantity:
-        description: "Optional custom override for factory to Fardo quantity."
-        required: false
-        default: ""
-      factory_fardo_shipping_method:
-        description: "Optional custom override for factory to Fardo shipping method."
-        required: false
-        default: ""
-      warehouse_sorange_order_point:
-        description: "Optional custom override for Sorange warehouse order point."
-        required: false
-        default: ""
-      warehouse_sorange_quantity:
-        description: "Optional custom override for Sorange warehouse quantity."
-        required: false
-        default: ""
-      warehouse_sorange_shipping_method:
-        description: "Optional custom override for Sorange warehouse shipping method."
-        required: false
-        default: ""
-      warehouse_tyran_order_point:
-        description: "Optional custom override for Tyran warehouse order point."
-        required: false
-        default: ""
-      warehouse_tyran_quantity:
-        description: "Optional custom override for Tyran warehouse quantity."
-        required: false
-        default: ""
-      warehouse_tyran_shipping_method:
-        description: "Optional custom override for Tyran warehouse shipping method."
-        required: false
-        default: ""
-      warehouse_entworpe_order_point:
-        description: "Optional custom override for Entworpe warehouse order point."
-        required: false
-        default: ""
-      warehouse_entworpe_quantity:
-        description: "Optional custom override for Entworpe warehouse quantity."
-        required: false
-        default: ""
-      warehouse_entworpe_shipping_method:
-        description: "Optional custom override for Entworpe warehouse shipping method."
-        required: false
-        default: ""
+        default: "{}"
       allow_shipping_method_change:
         description: "Extra confirmation for shipping method changes; config must also allow it."
         required: true
@@ -179,33 +75,7 @@ jobs:
           POLICY_APPLY_CONFIRM: ${{ inputs.confirm }}
           POLICY_APPLY_MODE: ${{ inputs.apply_mode }}
           POLICY_APPLY_DRY_RUN: ${{ inputs.dry_run }}
-          POLICY_FACTORY_ORDER_POINT: ${{ inputs.factory_order_point }}
-          POLICY_FACTORY_QUANTITY: ${{ inputs.factory_quantity }}
-          POLICY_FACTORY_SHIPPING_METHOD: ${{ inputs.factory_shipping_method }}
-          POLICY_WAREHOUSE_ORDER_POINT: ${{ inputs.warehouse_order_point }}
-          POLICY_WAREHOUSE_QUANTITY: ${{ inputs.warehouse_quantity }}
-          POLICY_WAREHOUSE_SHIPPING_METHOD: ${{ inputs.warehouse_shipping_method }}
-          POLICY_FACTORY_SORANGE_ORDER_POINT: ${{ inputs.factory_sorange_order_point }}
-          POLICY_FACTORY_SORANGE_QUANTITY: ${{ inputs.factory_sorange_quantity }}
-          POLICY_FACTORY_SORANGE_SHIPPING_METHOD: ${{ inputs.factory_sorange_shipping_method }}
-          POLICY_FACTORY_TYRAN_ORDER_POINT: ${{ inputs.factory_tyran_order_point }}
-          POLICY_FACTORY_TYRAN_QUANTITY: ${{ inputs.factory_tyran_quantity }}
-          POLICY_FACTORY_TYRAN_SHIPPING_METHOD: ${{ inputs.factory_tyran_shipping_method }}
-          POLICY_FACTORY_ENTWORPE_ORDER_POINT: ${{ inputs.factory_entworpe_order_point }}
-          POLICY_FACTORY_ENTWORPE_QUANTITY: ${{ inputs.factory_entworpe_quantity }}
-          POLICY_FACTORY_ENTWORPE_SHIPPING_METHOD: ${{ inputs.factory_entworpe_shipping_method }}
-          POLICY_FACTORY_FARDO_ORDER_POINT: ${{ inputs.factory_fardo_order_point }}
-          POLICY_FACTORY_FARDO_QUANTITY: ${{ inputs.factory_fardo_quantity }}
-          POLICY_FACTORY_FARDO_SHIPPING_METHOD: ${{ inputs.factory_fardo_shipping_method }}
-          POLICY_WAREHOUSE_SORANGE_ORDER_POINT: ${{ inputs.warehouse_sorange_order_point }}
-          POLICY_WAREHOUSE_SORANGE_QUANTITY: ${{ inputs.warehouse_sorange_quantity }}
-          POLICY_WAREHOUSE_SORANGE_SHIPPING_METHOD: ${{ inputs.warehouse_sorange_shipping_method }}
-          POLICY_WAREHOUSE_TYRAN_ORDER_POINT: ${{ inputs.warehouse_tyran_order_point }}
-          POLICY_WAREHOUSE_TYRAN_QUANTITY: ${{ inputs.warehouse_tyran_quantity }}
-          POLICY_WAREHOUSE_TYRAN_SHIPPING_METHOD: ${{ inputs.warehouse_tyran_shipping_method }}
-          POLICY_WAREHOUSE_ENTWORPE_ORDER_POINT: ${{ inputs.warehouse_entworpe_order_point }}
-          POLICY_WAREHOUSE_ENTWORPE_QUANTITY: ${{ inputs.warehouse_entworpe_quantity }}
-          POLICY_WAREHOUSE_ENTWORPE_SHIPPING_METHOD: ${{ inputs.warehouse_entworpe_shipping_method }}
+          POLICY_CUSTOM_JSON: ${{ inputs.custom_json }}
           POLICY_ALLOW_SHIPPING_METHOD_CHANGE: ${{ inputs.allow_shipping_method_change }}
 
       - name: Upload apply output

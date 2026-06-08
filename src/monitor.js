@@ -3321,11 +3321,10 @@ function customPolicyChangesFromEnv(config, policySnapshot, baseSet = {}) {
     });
   }
 
-  for (const [envName, area, parameter] of specs) {
-    const raw = optionalEnv(envName, "").trim();
-
+  function applyManualInput(sourceName, area, parameter, rawValue) {
+    const raw = String(rawValue ?? "").trim();
     if (!raw) {
-      continue;
+      return;
     }
 
     const suggested =
@@ -3352,10 +3351,69 @@ function customPolicyChangesFromEnv(config, policySnapshot, baseSet = {}) {
       urgency: "manual",
       confidence: "manual",
       reason: existing
-        ? `Manual workflow input ${envName}; overrides latest suggested value ${existing.suggested}.`
-        : `Manual workflow input ${envName}.`,
+        ? `Manual workflow input ${sourceName}; overrides latest suggested value ${existing.suggested}.`
+        : `Manual workflow input ${sourceName}.`,
       source: existing ? "workflow override over latest recommendation" : "workflow input",
     });
+  }
+
+  for (const [envName, area, parameter] of specs) {
+    applyManualInput(envName, area, parameter, optionalEnv(envName, ""));
+  }
+
+  const customJsonRaw = optionalEnv("POLICY_CUSTOM_JSON", "").trim();
+  if (customJsonRaw && customJsonRaw !== "{}") {
+    let custom;
+
+    try {
+      custom = JSON.parse(customJsonRaw);
+    } catch (error) {
+      throw new Error(`POLICY_CUSTOM_JSON is not valid JSON: ${error.message}`);
+    }
+
+    const parameters = ["order_point", "quantity", "shipping_method"];
+
+    function areaParameterFromFlatKey(key) {
+      const normalized = String(key || "")
+        .toLowerCase()
+        .replace(/^policy_/, "");
+      const areas = Object.keys(POLICY_AREA_DEFS).sort((a, b) => b.length - a.length);
+
+      for (const area of areas) {
+        for (const parameter of parameters) {
+          if (normalized === `${area}_${parameter}`) {
+            return { area, parameter };
+          }
+        }
+      }
+
+      return null;
+    }
+
+    if (custom && typeof custom === "object" && !Array.isArray(custom)) {
+      for (const [key, value] of Object.entries(custom)) {
+        const area = String(key || "").toLowerCase();
+
+        if (
+          POLICY_AREA_DEFS[area] &&
+          value &&
+          typeof value === "object" &&
+          !Array.isArray(value)
+        ) {
+          for (const parameter of parameters) {
+            if (Object.prototype.hasOwnProperty.call(value, parameter)) {
+              applyManualInput(`POLICY_CUSTOM_JSON.${area}.${parameter}`, area, parameter, value[parameter]);
+            }
+          }
+          continue;
+        }
+
+        const flat = areaParameterFromFlatKey(key);
+        if (flat) {
+          applyManualInput(`POLICY_CUSTOM_JSON.${key}`, flat.area, flat.parameter, value);
+        }
+      }
+    }
   }
 
   return {
