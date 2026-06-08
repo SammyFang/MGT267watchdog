@@ -13,6 +13,9 @@ on:
           - "false"
           - "true"
         default: "false"
+  push:
+    branches:
+      - main
 
 permissions:
   actions: write
@@ -22,11 +25,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: supply-chain-warning
-  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+  group: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[warning-now]') && format('supply-chain-warning-skip-{0}', github.run_id) || 'supply-chain-warning' }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[warning-now]')) }}
 
 jobs:
   warning-monitor:
+    if: github.event_name != 'push' || contains(github.event.head_commit.message, '[warning-now]')
     runs-on: ubuntu-latest
     timeout-minutes: 80
     environment:
