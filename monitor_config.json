@@ -339,8 +339,8 @@
   },
   "auto_adjust": {
     "enabled": true,
-    "mode": "research_only",
-    "allow_game_updates": false,
+    "mode": "autopilot_recommendations",
+    "allow_game_updates": true,
     "targets": {
       "days_of_cover_min": 3,
       "days_of_cover_max": 6,
@@ -388,6 +388,9 @@
       "schedule_minutes": 5,
       "consecutive_confirmations_required": 1,
       "minimum_game_days_between_apply": 1,
+      "emergency_same_day_max_applies": 2,
+      "emergency_cover_days_max": 2,
+      "emergency_network_lost_demand_min": 1,
       "default_enabled_env": "POLICY_AUTOPILOT_ENABLED",
       "block_when_no_latest_state": false
     },

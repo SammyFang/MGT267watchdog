@@ -2610,6 +2610,15 @@ function buildAutoAdjustmentPlan(
     reason,
     change = "",
   }) {
+    const normalizedArea = String(area || "").toLowerCase();
+    const normalizedParameter = String(parameter || "").toLowerCase();
+    const normalizedDirection = String(direction || "").toLowerCase();
+    const fieldSupported =
+      config.policy_apply?.enabled !== false &&
+      pageIdForPolicyArea(normalizedArea) &&
+      controlNameForPolicyParameter(normalizedParameter, normalizedArea) &&
+      !["hold", "review", "tighten", "protect_service"].includes(normalizedDirection);
+
     recommendations.push({
       area,
       parameter,
@@ -2620,7 +2629,7 @@ function buildAutoAdjustmentPlan(
       urgency,
       confidence,
       reason,
-      submit_allowed: false,
+      submit_allowed: Boolean(fieldSupported),
     });
   }
 
@@ -3058,10 +3067,10 @@ function buildAutoAdjustmentPlan(
     dashboard_day: record.dashboardDay,
     posture,
     safety: {
-      research_only: true,
-      game_updates_enabled: false,
-      submit_allowed: false,
-      note: "This planner only writes recommendations to reports and files. It never submits Factory or Warehouse game forms.",
+      research_only: false,
+      game_updates_enabled: config.policy_apply?.enabled !== false,
+      submit_allowed: config.policy_apply?.enabled !== false,
+      note: "Planner writes guarded recommendations; the policy_apply workflow submits only accepted supported fields after a fresh crawl, autopilot checks, and guardrail validation.",
     },
     inputs: {
       warehouse_inventory: record.warehouseInventory,
@@ -3637,6 +3646,7 @@ function policyChangeSignature(changes = []) {
 function buildAutopilotDecision(config, previousState, record, validated, candidateSet, options = {}) {
   const autopilot = config.policy_apply?.autopilot || {};
   const enabled = options.autopilot === true;
+  const metricCatalog = options.metricCatalog;
   const envName = autopilot.default_enabled_env || "POLICY_AUTOPILOT_ENABLED";
   const envText = optionalEnv(envName, "");
   const envEnabled = envText
@@ -3660,10 +3670,36 @@ function buildAutopilotDecision(config, previousState, record, validated, candid
     0,
     Number(autopilot.minimum_game_days_between_apply ?? 1) || 1,
   );
+  const emergencySameDayMaxApplies = Math.max(
+    0,
+    Number(autopilot.emergency_same_day_max_applies ?? 1) || 0,
+  );
+  const emergencyCoverDaysMax = Number(autopilot.emergency_cover_days_max ?? 2);
+  const emergencyNetworkLostDemandMin = Number(
+    autopilot.emergency_network_lost_demand_min ?? 1,
+  );
   const gameDayGap =
     Number.isFinite(currentDay) && Number.isFinite(lastApplyDay)
       ? currentDay - lastApplyDay
       : null;
+  const sameDayAsLastApply =
+    Number.isFinite(currentDay) &&
+    Number.isFinite(lastApplyDay) &&
+    currentDay === lastApplyDay;
+  const previousSameDayApplyCount = sameDayAsLastApply
+    ? Math.max(1, Number(previousState.last_autopilot_same_day_apply_count || 1))
+    : 0;
+  const daysOfCover = metricValue(metricCatalog, "derived:days_of_cover");
+  const networkLostDemand =
+    metricValue(metricCatalog, "derived:network_lost_demand") ??
+    metricValue(metricCatalog, "derived:calopeia_served_lost_demand") ??
+    metricValue(metricCatalog, "hq_lost_demand:Calopeia");
+  const hasAcceptedIncrease = accepted.some((change) => Number(change.delta) > 0);
+  const emergencyShortage =
+    hasAcceptedIncrease &&
+    ((Number.isFinite(daysOfCover) && daysOfCover <= emergencyCoverDaysMax) ||
+      (Number.isFinite(networkLostDemand) &&
+        networkLostDemand >= emergencyNetworkLostDemandMin));
   let applyAllowed = true;
   let reason = "Autopilot guardrails passed.";
 
@@ -3689,7 +3725,15 @@ function buildAutopilotDecision(config, previousState, record, validated, candid
     gameDayGap !== null &&
     gameDayGap < minGameDaysBetweenApply
   ) {
-    block(`Already applied on day ${lastApplyDay}; minimum spacing is ${minGameDaysBetweenApply} game day(s).`);
+    if (
+      emergencyShortage &&
+      sameDayAsLastApply &&
+      previousSameDayApplyCount < emergencySameDayMaxApplies
+    ) {
+      reason = `Emergency shortage override: cover ${formatMetricNumber(daysOfCover, "days")} / network lost demand ${formatMetricNumber(networkLostDemand)} allows same-day apply ${previousSameDayApplyCount + 1}/${emergencySameDayMaxApplies}.`;
+    } else {
+      block(`Already applied on day ${lastApplyDay}; minimum spacing is ${minGameDaysBetweenApply} game day(s).`);
+    }
   } else if (!signature) {
     block("No stable policy-change signature.");
   } else if (consecutiveCount < requiredConfirmations) {
@@ -3711,6 +3755,16 @@ function buildAutopilotDecision(config, previousState, record, validated, candid
     current_day: Number.isFinite(currentDay) ? currentDay : null,
     last_apply_day: Number.isFinite(lastApplyDay) ? lastApplyDay : null,
     minimum_game_days_between_apply: minGameDaysBetweenApply,
+    same_day_apply_count: previousSameDayApplyCount,
+    emergency_same_day_max_applies: emergencySameDayMaxApplies,
+    emergency_shortage_override: emergencyShortage,
+    emergency_cover_days_max: Number.isFinite(emergencyCoverDaysMax)
+      ? emergencyCoverDaysMax
+      : null,
+    current_cover_days: Number.isFinite(daysOfCover) ? daysOfCover : null,
+    current_network_lost_demand: Number.isFinite(networkLostDemand)
+      ? networkLostDemand
+      : null,
     accepted_change_count: accepted.length,
     stale_run_protection: "Every autopilot cycle re-crawls the latest game pages immediately before submit; GitHub concurrency keeps policy updates serialized so one cycle cannot overlap another.",
   };
@@ -5432,8 +5486,8 @@ function buildAdjustmentPlanLines(plan) {
 
   return [
     "",
-    "Auto-Adjustment Research Plan",
-    `Mode: ${plan.mode || "research_only"} | submit_allowed: no`,
+    "Autopilot Adjustment Candidates",
+    `Mode: ${plan.mode || "autopilot_recommendations"} | policy apply: guarded separately by policy_apply workflow`,
     `Posture: ${plan.posture || "n/a"}`,
     ...(plan.safety?.note ? [`Safety: ${plan.safety.note}`] : []),
     ...recommendations.map((item) =>
@@ -5466,7 +5520,7 @@ function buildPolicyApplyLines(config, plan, policySnapshot = []) {
 
   return [
     "",
-    "Approval-Gated Apply",
+    "Guarded Policy Apply",
     workflowUrl ? `Workflow: ${workflowUrl}` : "Workflow: not configured",
     "To apply: open workflow, choose recommended mode, type APPLY in confirm. The workflow re-crawls latest values and uses the latest safe recommended values before submitting.",
     "Optional edits: choose custom mode and fill only fields you want to override; blank custom fields still use the latest recommendation.",
@@ -8251,6 +8305,7 @@ async function runPolicyApply(config) {
     {
       autopilot: autopilotRun,
       dryRun,
+      metricCatalog,
     },
   );
 
@@ -8289,6 +8344,8 @@ async function runPolicyApply(config) {
     changes: validated,
   };
 
+  let outputPolicySnapshot = policySnapshot;
+
   if (candidateSet.conflicts.length > 0) {
     report.safety.game_updates_enabled = false;
     report.safety.note = "Conflicting recommendations detected; no game forms were submitted.";
@@ -8323,6 +8380,7 @@ async function runPolicyApply(config) {
     }
 
     const verified = verifyAppliedChanges(config, afterPolicySnapshot, accepted);
+    outputPolicySnapshot = afterPolicySnapshot;
     for (const verifiedChange of verified) {
       const target = report.changes.find(
         (change) =>
@@ -8363,7 +8421,7 @@ async function runPolicyApply(config) {
   );
   fs.writeFileSync(
     policySnapshotCsvPath,
-    buildPolicySnapshotCsv(policySnapshot),
+    buildPolicySnapshotCsv(outputPolicySnapshot),
     "utf8",
   );
   fs.writeFileSync(
@@ -8400,7 +8458,7 @@ async function runPolicyApply(config) {
     last_target_cash: standingReport.target.cash,
     last_target_cash_number: standingReport.target.cashNumber,
     last_adjustment_plan: adjustmentPlan,
-    last_policy_pages: policySnapshot,
+    last_policy_pages: outputPolicySnapshot,
   };
 
   if (autopilotRun) {
@@ -8418,11 +8476,21 @@ async function runPolicyApply(config) {
       Number.isFinite(currentDayNumber) ? currentDayNumber : null;
 
     if (appliedChanges.length > 0 && Number.isFinite(currentDayNumber)) {
+      const previousApplyDay = dayNumberFromValue(
+        previousState.last_autopilot_apply_day_number,
+      );
+      const sameDayAsPreviousApply =
+        Number.isFinite(previousApplyDay) && previousApplyDay === currentDayNumber;
+      const previousSameDayCount = sameDayAsPreviousApply
+        ? Math.max(1, Number(previousState.last_autopilot_same_day_apply_count || 1))
+        : 0;
       nextState.last_autopilot_apply_at = checkedAt;
       nextState.last_autopilot_apply_at_local = report.generated_at_local;
       nextState.last_autopilot_apply_day_number = currentDayNumber;
       nextState.last_autopilot_apply_signature =
         autopilotDecision.current_signature;
+      nextState.last_autopilot_same_day_apply_count =
+        sameDayAsPreviousApply ? previousSameDayCount + 1 : 1;
     }
   }
 
