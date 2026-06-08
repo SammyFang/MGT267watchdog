@@ -2464,7 +2464,7 @@ function roundedPolicyValue(value) {
   return Math.max(0, Math.round(value));
 }
 
-function suggestPolicyNumber(current, direction, maxChange, min, max) {
+function suggestPolicyNumber(current, direction, maxChange, min, max, target = null) {
   if (!Number.isFinite(current)) {
     return {
       baseline: "",
@@ -2481,8 +2481,17 @@ function suggestPolicyNumber(current, direction, maxChange, min, max) {
     };
   }
 
-  const signedChange = direction === "increase" ? maxChange : -maxChange;
-  const suggested = roundedPolicyValue(clamp(current + signedChange, min, max));
+  const numericTarget = Number(target);
+  let next = current + (direction === "increase" ? maxChange : -maxChange);
+
+  if (Number.isFinite(numericTarget)) {
+    next =
+      direction === "increase"
+        ? Math.min(next, numericTarget)
+        : Math.max(next, numericTarget);
+  }
+
+  const suggested = roundedPolicyValue(clamp(next, min, max));
   const change = suggested - current;
 
   return {
@@ -2633,13 +2642,14 @@ function buildAutoAdjustmentPlan(
     });
   }
 
-  function addNumericPolicy(area, parameter, current, direction, step, reason) {
+  function addNumericPolicy(area, parameter, current, direction, step, reason, target = null) {
     const suggested = suggestPolicyNumber(
       Number(current),
       direction,
       step,
       parameter === "quantity" ? quantityMin : pointMin,
       parameter === "quantity" ? quantityMax : pointMax,
+      target,
     );
     addRecommendation({
       area,
@@ -2743,6 +2753,7 @@ function buildAutoAdjustmentPlan(
       factoryOrderPointDirection === "hold"
         ? `Shortage risk is timing-driven, but factory order point already exceeds served-demand target; ${inventoryReason}; ${pipelineText}.`
         : `Shortage risk detected and factory order point is below served-demand target; ${inventoryReason}.`,
+      targetOrderPoint,
     );
     addNumericPolicy(
       "factory",
@@ -2753,6 +2764,7 @@ function buildAutoAdjustmentPlan(
       factoryQuantityDirection === "hold"
         ? `Current batch quantity is already large relative to served demand; avoid bullwhip and wait for pipeline unless lost demand persists.`
         : `Raise replenishment cautiously until coverage returns to ${daysMin}-${daysMax} days.`,
+      targetQuantity,
     );
     addNumericPolicy(
       "warehouse",
@@ -2763,6 +2775,7 @@ function buildAutoAdjustmentPlan(
       warehouseOrderPointDirection === "hold"
         ? `Warehouse order point already exceeds served-demand target; shortage risk points to timing or inbound pipeline, not a lower trigger point.`
         : `Warehouse coverage is below target or lost demand is present; ${inventoryReason}.`,
+      targetOrderPoint,
     );
     addNumericPolicy(
       "warehouse",
@@ -2773,6 +2786,7 @@ function buildAutoAdjustmentPlan(
       warehouseQuantityDirection === "hold"
         ? `Keep warehouse quantity steady to avoid over-correction while inbound inventory catches up.`
         : "Increase outbound replenishment planning only after confirming inventory is available.",
+      targetQuantity,
     );
 
     if (
@@ -2982,6 +2996,7 @@ function buildAutoAdjustmentPlan(
           "increase",
           orderPointStep,
           `${regionConfig.region} shortage risk detected; ${regionReason}.`,
+          regionTargetOrderPoint,
         );
       }
 
@@ -2996,6 +3011,7 @@ function buildAutoAdjustmentPlan(
           "increase",
           orderPointStep,
           `${regionConfig.region} warehouse reorder point is below lead-time demand; ${regionReason}.`,
+          regionTargetOrderPoint,
         );
       }
 
@@ -3010,6 +3026,7 @@ function buildAutoAdjustmentPlan(
           "increase",
           quantityStep,
           `${regionConfig.region} batch quantity is below the demand target; ${regionReason}.`,
+          regionTargetQuantity,
         );
       }
 
@@ -3024,6 +3041,7 @@ function buildAutoAdjustmentPlan(
           "increase",
           quantityStep,
           `${regionConfig.region} warehouse quantity is below the demand target; ${regionReason}.`,
+          regionTargetQuantity,
         );
       }
     }
