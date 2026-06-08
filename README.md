@@ -72,13 +72,13 @@ To download the latest full crawler workbook without sending email or changing t
 
 The artifact includes `supply_chain_data_latest.xlsx` plus the latest JSON/CSV outputs, including `policy_snapshot_latest.csv`, the research-only `adjustment_plan_latest` files, and the per-trigger `backtest_latest` outputs. This workflow does not restore or save the scheduled monitor cache.
 
-## Semi-Automatic Apply
+## Official Form Apply API
 
-Hourly emails include an `Approval-Gated Apply` section with a button to open `Apply Recommended Policy`.
+The project does not modify game databases directly. It provides an API-like wrapper around the official Supply Chain Game forms: each run logs in, re-crawls the latest form values, submits accepted official form fields, then re-crawls the pages to verify the values were stored.
 
-The apply workflow always re-crawls the latest game data before doing anything. It does not trust stale email values.
+The guarded autopilot runs automatically in `.github/workflows/autopilot.yml`. Manual or external systems can also call `.github/workflows/apply-policy.yml` through GitHub's REST workflow dispatch endpoint.
 
-To apply the current recommendation:
+To apply the current recommendation from GitHub's UI:
 
 1. Open GitHub `Actions`.
 2. Select `Apply Recommended Policy`.
@@ -86,16 +86,36 @@ To apply the current recommendation:
 4. Use `apply_mode=recommended`.
 5. Type `APPLY` in `confirm`.
 
-Any other confirmation value runs validation only. You can force validation by setting `dry_run=true`.
-Push with `[apply-dry-run]` runs the same workflow in validation-only mode for deployment checks; it cannot submit game forms.
+Any other confirmation value runs validation only. You can force validation by setting `dry_run=true`. The workflow always re-crawls the latest game data before doing anything. It does not trust stale email values.
+
+To call the same official form wrapper as an API:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer GITHUB_TOKEN_WITH_ACTIONS_WRITE" \
+  -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/SammyFang/MGT267watchdog/actions/workflows/apply-policy.yml/dispatches \
+  -d '{
+    "ref": "main",
+    "inputs": {
+      "confirm": "APPLY",
+      "apply_mode": "recommended",
+      "dry_run": "false",
+      "allow_shipping_method_change": "false"
+    }
+  }'
+```
+
+For custom values, use `apply_mode=custom` and include only the fields you want to override. Blank fields keep the latest guarded recommendation.
 
 Guardrails:
 
 - No priority-level changes.
 - No capacity changes.
 - No direct public email link that can modify the game without GitHub authentication.
-- At most 4 numeric fields per run.
-- `order_point` and `quantity` change by at most `policy_apply.max_change_per_apply`, currently `25`.
+- At most `policy_apply.max_numeric_changes_per_run` numeric fields per run.
+- `order_point` and `quantity` change by at most `policy_apply.max_change_per_apply`.
+- Suggested increases are capped at the computed target so the workflow does not jump past the lead-time-aware forecast target.
 - Decreases are blocked when served lost demand is present or served cover is below the dynamic minimum.
 - Increases are blocked when served cover is already above the dynamic maximum and no lost demand is present.
 - Shipping method changes are blocked unless both `policy_apply.allow_shipping_method_change=true` and the workflow input `allow_shipping_method_change=true`.
@@ -105,9 +125,30 @@ Custom mode can set these fields manually, with the same guardrails:
 - `factory_order_point`
 - `factory_quantity`
 - `factory_shipping_method`
+- `factory_sorange_order_point`
+- `factory_sorange_quantity`
+- `factory_sorange_shipping_method`
+- `factory_tyran_order_point`
+- `factory_tyran_quantity`
+- `factory_tyran_shipping_method`
+- `factory_entworpe_order_point`
+- `factory_entworpe_quantity`
+- `factory_entworpe_shipping_method`
+- `factory_fardo_order_point`
+- `factory_fardo_quantity`
+- `factory_fardo_shipping_method`
 - `warehouse_order_point`
 - `warehouse_quantity`
 - `warehouse_shipping_method`
+- `warehouse_sorange_order_point`
+- `warehouse_sorange_quantity`
+- `warehouse_sorange_shipping_method`
+- `warehouse_tyran_order_point`
+- `warehouse_tyran_quantity`
+- `warehouse_tyran_shipping_method`
+- `warehouse_entworpe_order_point`
+- `warehouse_entworpe_quantity`
+- `warehouse_entworpe_shipping_method`
 
 Outputs:
 

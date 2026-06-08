@@ -3302,14 +3302,15 @@ function policyWorkflowInputName(area, parameter) {
 }
 
 function customPolicyChangesFromEnv(config, policySnapshot, baseSet = {}) {
-  const specs = [
-    ["POLICY_FACTORY_ORDER_POINT", "factory", "order_point"],
-    ["POLICY_FACTORY_QUANTITY", "factory", "quantity"],
-    ["POLICY_FACTORY_SHIPPING_METHOD", "factory", "shipping_method"],
-    ["POLICY_WAREHOUSE_ORDER_POINT", "warehouse", "order_point"],
-    ["POLICY_WAREHOUSE_QUANTITY", "warehouse", "quantity"],
-    ["POLICY_WAREHOUSE_SHIPPING_METHOD", "warehouse", "shipping_method"],
-  ];
+  const specs = Object.entries(POLICY_AREA_DEFS).flatMap(([area, definition]) =>
+    ["order_point", "quantity", "shipping_method"]
+      .filter((parameter) => definition.controls?.[parameter])
+      .map((parameter) => [
+        `POLICY_${area.toUpperCase()}_${parameter.toUpperCase()}`,
+        area,
+        parameter,
+      ]),
+  );
   const changesByKey = new Map();
   const overriddenKeys = new Set();
 
