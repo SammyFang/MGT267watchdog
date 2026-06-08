@@ -5342,6 +5342,140 @@ function buildMetricCatalog(config, record, standingReport, snapshot, options = 
   const competitor = nearestCompetitor(standingReport);
   const coverTargets = coverageTargets(config, record);
   const rules = gameRules(config);
+  const marketRegions = ["Calopeia", "Sorange", "Tyran", "Entworpe", "Fardo"];
+  const warehouseInventoryKeys = {
+    Calopeia: "warehouse_inventory:warehouse",
+    Sorange: "warehouse_sorange_inventory:warehouse",
+    Tyran: "warehouse_tyran_inventory:warehouse",
+    Entworpe: "warehouse_entworpe_inventory:warehouse",
+  };
+  const warehouseShipmentKeys = {
+    Calopeia: "warehouse_shipments:Calopeia",
+    Sorange: "warehouse_sorange_shipments:Sorange",
+    Tyran: "warehouse_tyran_shipments:Tyran",
+    Entworpe: "warehouse_entworpe_shipments:Entworpe",
+  };
+
+  let networkDemand = 0;
+  let networkLostDemand = 0;
+  let networkDemandFound = false;
+  let networkLostFound = false;
+
+  for (const region of marketRegions) {
+    const regionDemand = metricMapValue(metricMap, `hq_demand:${region}`);
+    const regionLostDemand = metricMapValue(metricMap, `hq_lost_demand:${region}`);
+
+    if (Number.isFinite(regionDemand)) {
+      networkDemand += regionDemand;
+      networkDemandFound = true;
+    }
+
+    if (Number.isFinite(regionLostDemand)) {
+      networkLostDemand += regionLostDemand;
+      networkLostFound = true;
+    }
+  }
+
+  if (networkDemandFound) {
+    addMetric(metricMap, {
+      key: "derived:network_demand",
+      label: "Network demand",
+      valueNumber: networkDemand,
+      unit: "units",
+      source: "sum of headquarters demand across markets",
+    });
+  }
+
+  if (networkLostFound) {
+    addMetric(metricMap, {
+      key: "derived:network_lost_demand",
+      label: "Network lost demand",
+      valueNumber: networkLostDemand,
+      unit: "units",
+      source: "sum of headquarters lost demand across markets",
+    });
+  }
+
+  if (networkDemandFound && networkLostFound && networkDemand > 0) {
+    addMetric(metricMap, {
+      key: "derived:network_lost_demand_rate",
+      label: "Network lost demand rate",
+      valueNumber: (networkLostDemand / networkDemand) * 100,
+      unit: "%",
+      source: "derived from network demand and lost demand",
+    });
+  }
+
+  for (const region of Object.keys(warehouseInventoryKeys)) {
+    const inventory =
+      region === "Calopeia"
+        ? record.warehouseInventory
+        : metricMapValue(metricMap, warehouseInventoryKeys[region]);
+    const regionDemand = metricMapValue(metricMap, `hq_demand:${region}`);
+    const regionLostDemand = metricMapValue(metricMap, `hq_lost_demand:${region}`);
+    const regionShipments = metricMapValue(metricMap, warehouseShipmentKeys[region]);
+    const keyPrefix = region.toLowerCase();
+
+    if (Number.isFinite(inventory)) {
+      addMetric(metricMap, {
+        key: `derived:${keyPrefix}_warehouse_inventory`,
+        label: `${region} warehouse inventory`,
+        valueNumber: inventory,
+        unit: "units",
+        source: warehouseInventoryKeys[region],
+      });
+    }
+
+    if (Number.isFinite(regionLostDemand)) {
+      addMetric(metricMap, {
+        key: `derived:${keyPrefix}_lost_demand`,
+        label: `${region} lost demand`,
+        valueNumber: regionLostDemand,
+        unit: "units",
+        source: `hq_lost_demand:${region}`,
+      });
+    }
+
+    if (Number.isFinite(inventory) && Number.isFinite(regionDemand) && regionDemand > 0) {
+      const regionCover = inventory / regionDemand;
+
+      addMetric(metricMap, {
+        key: `derived:${keyPrefix}_days_of_cover`,
+        label: `${region} days of cover`,
+        valueNumber: regionCover,
+        unit: "days",
+        source: `${region} warehouse inventory / ${region} demand`,
+      });
+      addMetric(metricMap, {
+        key: `derived:${keyPrefix}_cover_shortage_gap`,
+        label: `${region} cover shortage gap`,
+        valueNumber: coverTargets.min - regionCover,
+        unit: "days",
+        source: "positive means regional cover is below dynamic minimum",
+      });
+      addMetric(metricMap, {
+        key: `derived:${keyPrefix}_cover_excess_gap`,
+        label: `${region} cover excess gap`,
+        valueNumber: regionCover - coverTargets.max,
+        unit: "days",
+        source: "positive means regional cover is above dynamic maximum",
+      });
+    }
+
+    if (
+      Number.isFinite(regionShipments) &&
+      Number.isFinite(regionDemand) &&
+      regionDemand > 0
+    ) {
+      addMetric(metricMap, {
+        key: `derived:${keyPrefix}_shipment_to_demand_ratio`,
+        label: `${region} shipment / demand ratio`,
+        valueNumber: regionShipments / regionDemand,
+        unit: "ratio",
+        source: `${region} shipments / ${region} demand`,
+      });
+    }
+  }
 
   addMetric(metricMap, {
     key: "derived:calopeia_served_region_count",

@@ -10,14 +10,50 @@
       {
         "id": "warehouse_inventory",
         "section": "Warehouse",
-        "label": "Inventory",
+        "label": "Calopeia Inventory",
         "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+inventory&data=WH1"
       },
       {
         "id": "warehouse_shipments",
         "section": "Warehouse",
-        "label": "Shipments",
+        "label": "Calopeia Shipments",
         "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+shipments&data=SHIP1SEG1"
+      },
+      {
+        "id": "warehouse_sorange_inventory",
+        "section": "Warehouse",
+        "label": "Sorange Inventory",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+inventory&data=WH2"
+      },
+      {
+        "id": "warehouse_sorange_shipments",
+        "section": "Warehouse",
+        "label": "Sorange Shipments",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+shipments&data=SHIP2SEG1"
+      },
+      {
+        "id": "warehouse_tyran_inventory",
+        "section": "Warehouse",
+        "label": "Tyran Inventory",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+inventory&data=WH3"
+      },
+      {
+        "id": "warehouse_tyran_shipments",
+        "section": "Warehouse",
+        "label": "Tyran Shipments",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+shipments&data=SHIP3SEG1"
+      },
+      {
+        "id": "warehouse_entworpe_inventory",
+        "section": "Warehouse",
+        "label": "Entworpe Inventory",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+inventory&data=WH4"
+      },
+      {
+        "id": "warehouse_entworpe_shipments",
+        "section": "Warehouse",
+        "label": "Entworpe Shipments",
+        "url": "https://op.responsive.net/SupplyChain/SCPlotk?submit=plot+shipments&data=SHIP4SEG1"
       },
       {
         "id": "factory_wip",
@@ -153,6 +189,46 @@
         "severity": "critical",
         "channels": ["warning", "hourly"],
         "message": "Lost demand is present across regions served by Calopeia; inspect supply and shipment timing."
+      },
+      {
+        "id": "network_lost_demand_detected",
+        "label": "Network lost demand detected",
+        "metric": "derived:network_lost_demand",
+        "operator": ">",
+        "threshold": 0,
+        "severity": "critical",
+        "channels": ["warning", "hourly"],
+        "message": "Lost demand is present in at least one served market; prioritize service recovery before cutting inventory."
+      },
+      {
+        "id": "sorange_cover_low",
+        "label": "Sorange cover below dynamic minimum",
+        "metric": "derived:sorange_cover_shortage_gap",
+        "operator": ">",
+        "threshold": 0,
+        "severity": "critical",
+        "channels": ["warning", "hourly"],
+        "message": "Sorange warehouse cover is below the dynamic minimum."
+      },
+      {
+        "id": "tyran_cover_low",
+        "label": "Tyran cover below dynamic minimum",
+        "metric": "derived:tyran_cover_shortage_gap",
+        "operator": ">",
+        "threshold": 0,
+        "severity": "critical",
+        "channels": ["warning", "hourly"],
+        "message": "Tyran warehouse cover is below the dynamic minimum."
+      },
+      {
+        "id": "entworpe_cover_low",
+        "label": "Entworpe cover below dynamic minimum",
+        "metric": "derived:entworpe_cover_shortage_gap",
+        "operator": ">",
+        "threshold": 0,
+        "severity": "critical",
+        "channels": ["warning", "hourly"],
+        "message": "Entworpe warehouse cover is below the dynamic minimum."
       },
       {
         "id": "lost_demand_rate_high",
@@ -307,7 +383,7 @@
     "autopilot": {
       "enabled": true,
       "schedule_minutes": 5,
-      "consecutive_confirmations_required": 2,
+      "consecutive_confirmations_required": 1,
       "minimum_game_days_between_apply": 1,
       "default_enabled_env": "POLICY_AUTOPILOT_ENABLED",
       "block_when_no_latest_state": false
