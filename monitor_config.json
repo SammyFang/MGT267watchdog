@@ -349,7 +349,10 @@
       "warehouse_inventory_high": null,
       "lost_demand_max": 0,
       "shipment_to_demand_ratio_min": 0.9,
-      "wip_to_demand_ratio_max": 3
+      "wip_to_demand_ratio_max": 3,
+      "forecast_lookback_days": 14,
+      "forecast_stddev_factor": 0.5,
+      "forecast_quantile": 0.75
     },
     "max_change_per_run": {
       "order_point": 50,

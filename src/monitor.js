@@ -904,6 +904,78 @@ function ratioMetric(value) {
   return value.toFixed(3).replace(/\.?0+$/, "");
 }
 
+function quantile(values, probability) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+
+  if (sorted.length === 0) {
+    return null;
+  }
+
+  const q = Math.max(0, Math.min(1, Number(probability) || 0));
+  const position = (sorted.length - 1) * q;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+
+  if (lower === upper) {
+    return sorted[lower];
+  }
+
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
+function demandForecastFromPoints(points, currentDay, options = {}) {
+  const lookbackDays = Number(options.lookbackDays ?? 14);
+  const stddevFactor = Number(options.stddevFactor ?? 0.5);
+  const quantileProbability = Number(options.quantile ?? 0.75);
+  const history = (points || [])
+    .filter((point) => {
+      if (!Number.isFinite(point.day) || !Number.isFinite(point.value)) {
+        return false;
+      }
+
+      if (!Number.isFinite(currentDay)) {
+        return true;
+      }
+
+      return point.day <= currentDay + 1e-9 && point.day >= currentDay - lookbackDays;
+    })
+    .map((point) => point.value);
+  const values = history.length
+    ? history
+    : (points || []).filter((point) => Number.isFinite(point.value)).map((point) => point.value);
+
+  if (values.length === 0) {
+    return null;
+  }
+
+  const latest = values[values.length - 1];
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance =
+    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  const stddev = Math.sqrt(variance);
+  const highQuantile = quantile(values, quantileProbability);
+  const maximum = Math.max(...values);
+  const forecast = Math.min(
+    maximum,
+    Math.max(
+      latest,
+      mean + (Number.isFinite(stddevFactor) ? stddevFactor : 0.5) * stddev,
+      Number.isFinite(highQuantile) ? highQuantile : latest,
+    ),
+  );
+
+  return {
+    forecast,
+    latest,
+    mean,
+    stddev,
+    quantile: highQuantile,
+    max: maximum,
+    count: values.length,
+    lookbackDays,
+  };
+}
+
 function backtestDayLabel(value, fallback = "") {
   if (!Number.isFinite(value)) {
     return fallback || "";
@@ -2440,6 +2512,16 @@ function buildAutoAdjustmentPlan(
   const demand =
     metricValue(metricCatalog, "derived:calopeia_served_demand") ??
     metricValue(metricCatalog, "hq_demand:Calopeia");
+  const forecastDemand = metricValue(
+    metricCatalog,
+    "derived:calopeia_served_forecast_demand",
+  );
+  const planningDemand =
+    Number.isFinite(forecastDemand) && Number.isFinite(demand)
+      ? Math.max(forecastDemand, demand)
+      : Number.isFinite(forecastDemand)
+        ? forecastDemand
+        : demand;
   const shipments =
     metricValue(metricCatalog, "derived:calopeia_served_shipments") ??
     metricValue(metricCatalog, "warehouse_shipments:Calopeia");
@@ -2490,12 +2572,12 @@ function buildAutoAdjustmentPlan(
   const transportDays = shippingLeadDays(factory, rules);
   const replenishmentLeadDays = Math.max(0, productionDays + transportDays);
   const targetOrderPoint =
-    Number.isFinite(demand) && demand > 0 && Number.isFinite(daysTarget)
-      ? roundedPolicyValue(demand * (daysTarget + replenishmentLeadDays))
+    Number.isFinite(planningDemand) && planningDemand > 0 && Number.isFinite(daysTarget)
+      ? roundedPolicyValue(planningDemand * (daysTarget + replenishmentLeadDays))
       : null;
   const targetQuantity =
-    Number.isFinite(demand) && demand > 0 && Number.isFinite(daysTarget)
-      ? roundedPolicyValue(demand * Math.min(daysTarget, 4))
+    Number.isFinite(planningDemand) && planningDemand > 0 && Number.isFinite(daysTarget)
+      ? roundedPolicyValue(planningDemand * Math.min(daysTarget, 4))
       : null;
   const excessCoverage =
     (Number.isFinite(daysOfCover) && daysOfCover > daysMax) ||
@@ -2606,6 +2688,12 @@ function buildAutoAdjustmentPlan(
     Number.isFinite(daysOfCover) ? `days of cover ${formatMetricNumber(daysOfCover, "days")}` : "",
     Number.isFinite(demand)
       ? `served demand ${metricRaw(metricCatalog, "derived:calopeia_served_demand") || metricRaw(metricCatalog, "hq_demand:Calopeia")}`
+      : "",
+    Number.isFinite(forecastDemand)
+      ? `forecast demand ${formatMetricNumber(forecastDemand)}`
+      : "",
+    Number.isFinite(planningDemand)
+      ? `planning demand ${formatMetricNumber(planningDemand)}`
       : "",
     Number.isFinite(lostDemand)
       ? `served lost demand ${metricRaw(metricCatalog, "derived:calopeia_served_lost_demand") || metricRaw(metricCatalog, "hq_lost_demand:Calopeia")}`
@@ -2812,6 +2900,16 @@ function buildAutoAdjustmentPlan(
 
   for (const regionConfig of regionalPolicies) {
     const regionDemand = metricValue(metricCatalog, `hq_demand:${regionConfig.region}`);
+    const regionForecastDemand = metricValue(
+      metricCatalog,
+      `derived_forecast_demand:${regionConfig.region}`,
+    );
+    const regionPlanningDemand =
+      Number.isFinite(regionForecastDemand) && Number.isFinite(regionDemand)
+        ? Math.max(regionForecastDemand, regionDemand)
+        : Number.isFinite(regionForecastDemand)
+          ? regionForecastDemand
+          : regionDemand;
     const regionLostDemand = metricValue(metricCatalog, `hq_lost_demand:${regionConfig.region}`);
     const regionInventory = metricValue(
       metricCatalog,
@@ -2821,7 +2919,7 @@ function buildAutoAdjustmentPlan(
     const factoryPolicy = baseline[regionConfig.factoryArea] || {};
     const warehousePolicy = baseline[regionConfig.warehouseArea] || {};
 
-    if (!Number.isFinite(regionDemand) || regionDemand <= 0) {
+    if (!Number.isFinite(regionPlanningDemand) || regionPlanningDemand <= 0) {
       continue;
     }
 
@@ -2834,10 +2932,10 @@ function buildAutoAdjustmentPlan(
     const regionTransportDays = shippingLeadDays(factoryPolicy, rules);
     const regionLeadDays = Math.max(0, regionProductionDays + regionTransportDays);
     const regionTargetOrderPoint = roundedPolicyValue(
-      regionDemand * (daysTarget + regionLeadDays),
+      regionPlanningDemand * (daysTarget + regionLeadDays),
     );
     const regionTargetQuantity = roundedPolicyValue(
-      regionDemand * Math.min(daysTarget, 4),
+      regionPlanningDemand * Math.min(daysTarget, 4),
     );
     const regionShortageRisk =
       (Number.isFinite(regionLostDemand) && regionLostDemand > lostDemandMax) ||
@@ -2848,7 +2946,11 @@ function buildAutoAdjustmentPlan(
       Number.isFinite(regionCover)
         ? `cover ${formatMetricNumber(regionCover, "days")}`
         : "",
-      `demand ${formatMetricNumber(regionDemand)}`,
+      Number.isFinite(regionDemand) ? `demand ${formatMetricNumber(regionDemand)}` : "",
+      Number.isFinite(regionForecastDemand)
+        ? `forecast demand ${formatMetricNumber(regionForecastDemand)}`
+        : "",
+      `planning demand ${formatMetricNumber(regionPlanningDemand)}`,
       Number.isFinite(regionLostDemand)
         ? `lost demand ${formatMetricNumber(regionLostDemand)}`
         : "",
@@ -4599,6 +4701,27 @@ function buildDayChangeReview(config, previousState, record, metricCatalog, adju
   const demand =
     metricRaw(metricCatalog, "derived:calopeia_served_demand") ||
     String(latest.demand ?? "n/a");
+  const forecastDemand =
+    metricRaw(metricCatalog, "derived:calopeia_served_forecast_demand") ||
+    ratioMetric(latest.forecast_demand) ||
+    "n/a";
+  const demandNumber =
+    metricValue(metricCatalog, "derived:calopeia_served_demand") ??
+    metricValue(metricCatalog, "hq_demand:Calopeia") ??
+    Number(latest.demand);
+  const forecastDemandNumber =
+    metricValue(metricCatalog, "derived:calopeia_served_forecast_demand") ??
+    Number(latest.forecast_demand);
+  const planningDemandNumber =
+    Number.isFinite(demandNumber) && Number.isFinite(forecastDemandNumber)
+      ? Math.max(demandNumber, forecastDemandNumber)
+      : Number.isFinite(forecastDemandNumber)
+        ? forecastDemandNumber
+        : demandNumber;
+  const planningDemand =
+    Number.isFinite(planningDemandNumber)
+      ? formatMetricNumber(planningDemandNumber)
+      : "n/a";
   const shipments =
     metricRaw(metricCatalog, "derived:calopeia_served_shipments") ||
     String(latest.shipments ?? "n/a");
@@ -4643,6 +4766,8 @@ function buildDayChangeReview(config, previousState, record, metricCatalog, adju
     latest: {
       warehouse_inventory: record.warehouseInventory,
       demand,
+      forecast_demand: forecastDemand,
+      planning_demand: planningDemand,
       shipments,
       lost_demand: lostDemand,
       days_of_cover: daysOfCover,
@@ -4677,7 +4802,7 @@ function buildDayChangeReviewMarkdown(review) {
     `- Day status: ${changeText}${Number.isFinite(review.advanced_by) ? ` (${review.advanced_by >= 0 ? "+" : ""}${review.advanced_by})` : ""}`,
     `- Game clock: day ${review.current_day ?? "n/a"} / ${review.end_day}; remaining days ${review.remaining_days ?? "n/a"}; phase ${review.phase}`,
     `- Posture: ${review.posture}`,
-    `- Latest operations: inventory ${review.latest.warehouse_inventory ?? "n/a"}, demand ${review.latest.demand}, shipments ${review.latest.shipments}, lost demand ${review.latest.lost_demand}, cover ${review.latest.days_of_cover}, shipment/demand ${review.latest.shipment_to_demand_ratio}`,
+    `- Latest operations: inventory ${review.latest.warehouse_inventory ?? "n/a"}, demand ${review.latest.demand}, forecast ${review.latest.forecast_demand}, planning demand ${review.latest.planning_demand}, shipments ${review.latest.shipments}, lost demand ${review.latest.lost_demand}, cover ${review.latest.days_of_cover}, shipment/demand ${review.latest.shipment_to_demand_ratio}`,
     `- Cash lead vs nearest: ${review.latest.cash_lead_percent_vs_nearest}`,
     "",
     review.action_candidates.length
@@ -5494,6 +5619,15 @@ function nearestCompetitor(standingReport) {
 
 function buildMetricCatalog(config, record, standingReport, snapshot, options = {}) {
   const metricMap = new Map();
+  const plotSnapshots = snapshot
+    ? snapshot.sections.flatMap((section) => section.plots || [])
+    : [];
+  const currentDay = dashboardDayNumber(record);
+  const forecastOptions = {
+    lookbackDays: config.auto_adjust?.targets?.forecast_lookback_days ?? 14,
+    stddevFactor: config.auto_adjust?.targets?.forecast_stddev_factor ?? 0.5,
+    quantile: config.auto_adjust?.targets?.forecast_quantile ?? 0.75,
+  };
 
   addMetric(metricMap, {
     key: "dashboard:cash",
@@ -5575,12 +5709,19 @@ function buildMetricCatalog(config, record, standingReport, snapshot, options = 
 
   let networkDemand = 0;
   let networkLostDemand = 0;
+  let networkForecastDemand = 0;
   let networkDemandFound = false;
   let networkLostFound = false;
+  let networkForecastFound = false;
 
   for (const region of marketRegions) {
     const regionDemand = metricMapValue(metricMap, `hq_demand:${region}`);
     const regionLostDemand = metricMapValue(metricMap, `hq_lost_demand:${region}`);
+    const demandForecast = demandForecastFromPoints(
+      seriesPoints(plotSnapshots, "hq_demand", region),
+      currentDay,
+      forecastOptions,
+    );
 
     if (Number.isFinite(regionDemand)) {
       networkDemand += regionDemand;
@@ -5590,6 +5731,25 @@ function buildMetricCatalog(config, record, standingReport, snapshot, options = 
     if (Number.isFinite(regionLostDemand)) {
       networkLostDemand += regionLostDemand;
       networkLostFound = true;
+    }
+
+    if (demandForecast && Number.isFinite(demandForecast.forecast)) {
+      networkForecastDemand += demandForecast.forecast;
+      networkForecastFound = true;
+      addMetric(metricMap, {
+        key: `derived_forecast_demand:${region}`,
+        label: `${region} rolling demand forecast`,
+        valueNumber: demandForecast.forecast,
+        unit: "units/day",
+        source: `${demandForecast.count} observations over ${demandForecast.lookbackDays} days; max(latest, mean+stddev buffer, p${Math.round((forecastOptions.quantile ?? 0.75) * 100)})`,
+      });
+      addMetric(metricMap, {
+        key: `derived:${region.toLowerCase()}_forecast_demand`,
+        label: `${region} rolling demand forecast`,
+        valueNumber: demandForecast.forecast,
+        unit: "units/day",
+        source: "derived_forecast_demand",
+      });
     }
   }
 
@@ -5610,6 +5770,16 @@ function buildMetricCatalog(config, record, standingReport, snapshot, options = 
       valueNumber: networkLostDemand,
       unit: "units",
       source: "sum of headquarters lost demand across markets",
+    });
+  }
+
+  if (networkForecastFound) {
+    addMetric(metricMap, {
+      key: "derived:network_forecast_demand",
+      label: "Network rolling demand forecast",
+      valueNumber: networkForecastDemand,
+      unit: "units/day",
+      source: "sum of regional rolling demand forecasts",
     });
   }
 
@@ -5737,6 +5907,22 @@ function buildMetricCatalog(config, record, standingReport, snapshot, options = 
       label: "Calopeia served demand",
       valueNumber: demand,
       unit: "units",
+      source: `served regions: ${demandRegions.join(", ")}`,
+    });
+  }
+
+  const servedForecastDemand = sumMetricForRegions(
+    metricMap,
+    "derived_forecast_demand",
+    demandRegions,
+  );
+
+  if (Number.isFinite(servedForecastDemand)) {
+    addMetric(metricMap, {
+      key: "derived:calopeia_served_forecast_demand",
+      label: "Calopeia served rolling demand forecast",
+      valueNumber: servedForecastDemand,
+      unit: "units/day",
       source: `served regions: ${demandRegions.join(", ")}`,
     });
   }
