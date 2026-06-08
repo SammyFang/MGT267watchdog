@@ -2077,49 +2077,83 @@ function numericPolicyValue(control) {
   return Number.isFinite(value) ? value : undefined;
 }
 
-function buildScrapedPolicyBaseline(policySnapshot) {
-  const factoryPage = findPolicyPage(policySnapshot, "factory_calopeia");
-  const warehousePage = findPolicyPage(policySnapshot, "warehouse_calopeia");
-  const factoryShip = findPolicyControl(factoryPage, "ship1");
-  const warehouseShip = findPolicyControl(warehousePage, "ship1");
+const POLICY_AREA_DEFS = {
+  factory: {
+    pageId: "factory_calopeia",
+    controls: { shipping_method: "ship1", order_point: "point1", quantity: "quant1", priority: "priority1" },
+  },
+  factory_sorange: {
+    pageId: "factory_calopeia",
+    controls: { shipping_method: "ship2", order_point: "point2", quantity: "quant2", priority: "priority2" },
+  },
+  factory_tyran: {
+    pageId: "factory_calopeia",
+    controls: { shipping_method: "ship3", order_point: "point3", quantity: "quant3", priority: "priority3" },
+  },
+  factory_entworpe: {
+    pageId: "factory_calopeia",
+    controls: { shipping_method: "ship4", order_point: "point4", quantity: "quant4", priority: "priority4" },
+  },
+  factory_fardo: {
+    pageId: "factory_calopeia",
+    controls: { shipping_method: "ship5", order_point: "point5", quantity: "quant5", priority: "priority5" },
+  },
+  warehouse: {
+    pageId: "warehouse_calopeia",
+    controls: { shipping_method: "ship1", order_point: "point1", quantity: "quant1", priority: "priority1" },
+  },
+  warehouse_sorange: {
+    pageId: "warehouse_sorange",
+    controls: { shipping_method: "ship1", order_point: "point1", quantity: "quant1", priority: "priority1" },
+  },
+  warehouse_tyran: {
+    pageId: "warehouse_tyran",
+    controls: { shipping_method: "ship1", order_point: "point1", quantity: "quant1", priority: "priority1" },
+  },
+  warehouse_entworpe: {
+    pageId: "warehouse_entworpe",
+    controls: { shipping_method: "ship1", order_point: "point1", quantity: "quant1", priority: "priority1" },
+  },
+};
 
-  return {
-    factory: {
-      shipping_method: factoryShip?.value,
-      shipping_method_text: factoryShip?.text,
-      order_point: numericPolicyValue(findPolicyControl(factoryPage, "point1")),
-      quantity: numericPolicyValue(findPolicyControl(factoryPage, "quant1")),
-      priority: numericPolicyValue(findPolicyControl(factoryPage, "priority1")),
-    },
-    warehouse: {
-      shipping_method: warehouseShip?.value,
-      shipping_method_text: warehouseShip?.text,
-      order_point: numericPolicyValue(findPolicyControl(warehousePage, "point1")),
-      quantity: numericPolicyValue(findPolicyControl(warehousePage, "quant1")),
-      priority: numericPolicyValue(findPolicyControl(warehousePage, "priority1")),
-    },
-  };
+function buildScrapedPolicyBaseline(policySnapshot) {
+  const baseline = {};
+
+  for (const [area, def] of Object.entries(POLICY_AREA_DEFS)) {
+    const page = findPolicyPage(policySnapshot, def.pageId);
+    const ship = findPolicyControl(page, def.controls.shipping_method);
+
+    baseline[area] = {
+      shipping_method: ship?.value,
+      shipping_method_text: ship?.text,
+      order_point: numericPolicyValue(findPolicyControl(page, def.controls.order_point)),
+      quantity: numericPolicyValue(findPolicyControl(page, def.controls.quantity)),
+      priority: numericPolicyValue(findPolicyControl(page, def.controls.priority)),
+    };
+  }
+
+  return baseline;
 }
 
 function mergePolicyBaseline(fallbackBaseline = {}, scrapedBaseline = {}) {
-  return {
-    factory: {
-      ...(fallbackBaseline.factory || {}),
+  const merged = {};
+  const keys = new Set([
+    ...Object.keys(fallbackBaseline || {}),
+    ...Object.keys(scrapedBaseline || {}),
+  ]);
+
+  for (const key of keys) {
+    merged[key] = {
+      ...(fallbackBaseline[key] || {}),
       ...Object.fromEntries(
-        Object.entries(scrapedBaseline.factory || {}).filter(
+        Object.entries(scrapedBaseline[key] || {}).filter(
           ([, value]) => value !== undefined && value !== "",
         ),
       ),
-    },
-    warehouse: {
-      ...(fallbackBaseline.warehouse || {}),
-      ...Object.fromEntries(
-        Object.entries(scrapedBaseline.warehouse || {}).filter(
-          ([, value]) => value !== undefined && value !== "",
-        ),
-      ),
-    },
-  };
+    };
+  }
+
+  return merged;
 }
 
 function gameRules(config) {
@@ -2233,6 +2267,37 @@ function policyMethodText(policy = {}) {
 
 function policyNumberText(value) {
   return value === undefined || value === "" ? "n/a" : String(value);
+}
+
+function factoryCapacity(policySnapshot) {
+  const page = findPolicyPage(policySnapshot, "factory_calopeia");
+  const text = (page?.facts || []).join(" ");
+  const match = text.match(/current capacity of\s*(\d+(?:\.\d+)?)/i);
+  const capacity = match ? Number(match[1]) : null;
+
+  return Number.isFinite(capacity) && capacity > 0 ? capacity : null;
+}
+
+function shippingLeadDays(policy = {}, rules = gameRules({})) {
+  const text = String(policy.shipping_method_text || policy.shipping_method || "").toLowerCase();
+  const dayMatch = text.match(/(\d+(?:\.\d+)?)\s*day/);
+
+  if (dayMatch) {
+    const days = Number(dayMatch[1]);
+    if (Number.isFinite(days)) {
+      return days;
+    }
+  }
+
+  if (text.includes("truck")) {
+    return Number(rules.truck_lead_days ?? 7);
+  }
+
+  if (text.includes("mail")) {
+    return Number(rules.mail_lead_days ?? 1);
+  }
+
+  return 0;
 }
 
 function policyContextLines(config, policySnapshot) {
@@ -2397,6 +2462,7 @@ function buildAutoAdjustmentPlan(
   const truckPipeline = metricValue(metricCatalog, "warehouse_inventory:truck");
   const mailPipeline = metricValue(metricCatalog, "warehouse_inventory:mail");
   const rules = gameRules(config);
+  const capacity = factoryCapacity(policySnapshot);
 
   const coverTargets = coverageTargets(config, record);
   const daysMin = coverTargets.min;
@@ -2415,9 +2481,21 @@ function buildAutoAdjustmentPlan(
   const quantityMax = Number(bounds.quantity_max ?? 999999);
   const factory = baseline.factory || {};
   const warehouse = baseline.warehouse || {};
-  const targetInventory =
+  const productionDays =
+    Number.isFinite(capacity) &&
+    capacity > 0 &&
+    Number.isFinite(Number(factory.quantity))
+      ? Number(factory.quantity) / capacity
+      : 0;
+  const transportDays = shippingLeadDays(factory, rules);
+  const replenishmentLeadDays = Math.max(0, productionDays + transportDays);
+  const targetOrderPoint =
     Number.isFinite(demand) && demand > 0 && Number.isFinite(daysTarget)
-      ? roundedPolicyValue(demand * daysTarget)
+      ? roundedPolicyValue(demand * (daysTarget + replenishmentLeadDays))
+      : null;
+  const targetQuantity =
+    Number.isFinite(demand) && demand > 0 && Number.isFinite(daysTarget)
+      ? roundedPolicyValue(demand * Math.min(daysTarget, 4))
       : null;
   const excessCoverage =
     (Number.isFinite(daysOfCover) && daysOfCover > daysMax) ||
@@ -2487,16 +2565,17 @@ function buildAutoAdjustmentPlan(
 
   function shortageDirection(current, parameter) {
     const numericCurrent = Number(current);
+    const target = parameter === "quantity" ? targetQuantity : targetOrderPoint;
 
-    if (!Number.isFinite(numericCurrent) || targetInventory === null) {
+    if (!Number.isFinite(numericCurrent) || target === null) {
       return "increase";
     }
 
-    if (parameter === "quantity" && numericCurrent >= targetInventory) {
+    if (parameter === "quantity" && numericCurrent >= target) {
       return "hold";
     }
 
-    if (parameter === "order_point" && numericCurrent >= targetInventory) {
+    if (parameter === "order_point" && numericCurrent >= target) {
       return "hold";
     }
 
@@ -2531,7 +2610,11 @@ function buildAutoAdjustmentPlan(
     Number.isFinite(lostDemand)
       ? `served lost demand ${metricRaw(metricCatalog, "derived:calopeia_served_lost_demand") || metricRaw(metricCatalog, "hq_lost_demand:Calopeia")}`
       : "",
-    targetInventory !== null ? `target inventory near ${targetInventory}` : "",
+    targetOrderPoint !== null ? `target order point near ${targetOrderPoint}` : "",
+    targetQuantity !== null ? `target quantity near ${targetQuantity}` : "",
+    Number.isFinite(replenishmentLeadDays) && replenishmentLeadDays > 0
+      ? `lead time ${formatMetricNumber(replenishmentLeadDays, "days")} days`
+      : "",
   ]
     .filter(Boolean)
     .join("; ");
@@ -2706,6 +2789,135 @@ function buildAutoAdjustmentPlan(
     );
   }
 
+  const regionalPolicies = [
+    {
+      region: "Sorange",
+      key: "sorange",
+      factoryArea: "factory_sorange",
+      warehouseArea: "warehouse_sorange",
+    },
+    {
+      region: "Tyran",
+      key: "tyran",
+      factoryArea: "factory_tyran",
+      warehouseArea: "warehouse_tyran",
+    },
+    {
+      region: "Entworpe",
+      key: "entworpe",
+      factoryArea: "factory_entworpe",
+      warehouseArea: "warehouse_entworpe",
+    },
+  ];
+
+  for (const regionConfig of regionalPolicies) {
+    const regionDemand = metricValue(metricCatalog, `hq_demand:${regionConfig.region}`);
+    const regionLostDemand = metricValue(metricCatalog, `hq_lost_demand:${regionConfig.region}`);
+    const regionInventory = metricValue(
+      metricCatalog,
+      `derived:${regionConfig.key}_warehouse_inventory`,
+    );
+    const regionCover = metricValue(metricCatalog, `derived:${regionConfig.key}_days_of_cover`);
+    const factoryPolicy = baseline[regionConfig.factoryArea] || {};
+    const warehousePolicy = baseline[regionConfig.warehouseArea] || {};
+
+    if (!Number.isFinite(regionDemand) || regionDemand <= 0) {
+      continue;
+    }
+
+    const regionProductionDays =
+      Number.isFinite(capacity) &&
+      capacity > 0 &&
+      Number.isFinite(Number(factoryPolicy.quantity))
+        ? Number(factoryPolicy.quantity) / capacity
+        : 0;
+    const regionTransportDays = shippingLeadDays(factoryPolicy, rules);
+    const regionLeadDays = Math.max(0, regionProductionDays + regionTransportDays);
+    const regionTargetOrderPoint = roundedPolicyValue(
+      regionDemand * (daysTarget + regionLeadDays),
+    );
+    const regionTargetQuantity = roundedPolicyValue(
+      regionDemand * Math.min(daysTarget, 4),
+    );
+    const regionShortageRisk =
+      (Number.isFinite(regionLostDemand) && regionLostDemand > lostDemandMax) ||
+      (Number.isFinite(regionCover) && regionCover < daysMin) ||
+      (Number.isFinite(regionInventory) && regionInventory <= inventoryLow);
+    const regionReason = [
+      `${regionConfig.region} inventory ${Number.isFinite(regionInventory) ? formatMetricNumber(regionInventory) : "n/a"}`,
+      Number.isFinite(regionCover)
+        ? `cover ${formatMetricNumber(regionCover, "days")}`
+        : "",
+      `demand ${formatMetricNumber(regionDemand)}`,
+      Number.isFinite(regionLostDemand)
+        ? `lost demand ${formatMetricNumber(regionLostDemand)}`
+        : "",
+      `target order point near ${regionTargetOrderPoint}`,
+      `target quantity near ${regionTargetQuantity}`,
+      `lead time ${formatMetricNumber(regionLeadDays, "days")} days`,
+    ]
+      .filter(Boolean)
+      .join("; ");
+
+    if (regionShortageRisk) {
+      if (
+        Number.isFinite(Number(factoryPolicy.order_point)) &&
+        Number(factoryPolicy.order_point) < regionTargetOrderPoint
+      ) {
+        addNumericPolicy(
+          regionConfig.factoryArea,
+          "order_point",
+          factoryPolicy.order_point,
+          "increase",
+          orderPointStep,
+          `${regionConfig.region} shortage risk detected; ${regionReason}.`,
+        );
+      }
+
+      if (
+        Number.isFinite(Number(warehousePolicy.order_point)) &&
+        Number(warehousePolicy.order_point) < regionTargetOrderPoint
+      ) {
+        addNumericPolicy(
+          regionConfig.warehouseArea,
+          "order_point",
+          warehousePolicy.order_point,
+          "increase",
+          orderPointStep,
+          `${regionConfig.region} warehouse reorder point is below lead-time demand; ${regionReason}.`,
+        );
+      }
+
+      if (
+        Number.isFinite(Number(factoryPolicy.quantity)) &&
+        Number(factoryPolicy.quantity) < regionTargetQuantity
+      ) {
+        addNumericPolicy(
+          regionConfig.factoryArea,
+          "quantity",
+          factoryPolicy.quantity,
+          "increase",
+          quantityStep,
+          `${regionConfig.region} batch quantity is below the demand target; ${regionReason}.`,
+        );
+      }
+
+      if (
+        Number.isFinite(Number(warehousePolicy.quantity)) &&
+        Number(warehousePolicy.quantity) < regionTargetQuantity
+      ) {
+        addNumericPolicy(
+          regionConfig.warehouseArea,
+          "quantity",
+          warehousePolicy.quantity,
+          "increase",
+          quantityStep,
+          `${regionConfig.region} warehouse quantity is below the demand target; ${regionReason}.`,
+        );
+      }
+    }
+  }
+
   const cashLeadRule = (config.monitor?.alert_rules || []).find(
     (rule) => rule.id === "cash_lead_narrow",
   );
@@ -2760,7 +2972,13 @@ function buildAutoAdjustmentPlan(
       days_of_cover: daysOfCover,
       shipment_to_demand_ratio: shipmentRatio,
       cash_lead_percent_vs_nearest: cashLead,
-      target_inventory: targetInventory,
+      target_inventory: targetOrderPoint,
+      target_order_point: targetOrderPoint,
+      target_quantity: targetQuantity,
+      replenishment_lead_days: replenishmentLeadDays,
+      production_lead_days: productionDays,
+      transport_lead_days: transportDays,
+      factory_capacity: capacity,
       target_rank: standingReport.target.rank,
       target_cash: standingReport.target.cash,
       baseline_source:
@@ -2826,19 +3044,18 @@ function policyApplyWorkflowUrl(config) {
     : "";
 }
 
-function controlNameForPolicyParameter(parameter) {
-  return {
-    shipping_method: "ship1",
-    order_point: "point1",
-    quantity: "quant1",
-  }[parameter];
+function controlNameForPolicyParameter(parameter, area = "") {
+  const areaDef = POLICY_AREA_DEFS[area];
+
+  if (areaDef?.controls?.[parameter]) {
+    return areaDef.controls[parameter];
+  }
+
+  return POLICY_AREA_DEFS.factory.controls[parameter];
 }
 
 function pageIdForPolicyArea(area) {
-  return {
-    factory: "factory_calopeia",
-    warehouse: "warehouse_calopeia",
-  }[area];
+  return POLICY_AREA_DEFS[area]?.pageId;
 }
 
 function policyAreaCurrentValue(config, policySnapshot, area, parameter) {
@@ -2877,9 +3094,9 @@ function candidatePolicyChangesFromPlan(config, plan, policySnapshot, options = 
   for (const item of plan?.recommendations || []) {
     const area = String(item.area || "").toLowerCase();
     const parameter = String(item.parameter || "").toLowerCase();
-    const control = controlNameForPolicyParameter(parameter);
+    const control = controlNameForPolicyParameter(parameter, area);
 
-    if (!["factory", "warehouse"].includes(area) || !control) {
+    if (!pageIdForPolicyArea(area) || !control) {
       continue;
     }
 
@@ -2991,7 +3208,7 @@ function customPolicyChangesFromEnv(config, policySnapshot, baseSet = {}) {
     changesByKey.set(key, {
       area,
       parameter,
-      control: controlNameForPolicyParameter(parameter),
+        control: controlNameForPolicyParameter(parameter, area),
       current,
       suggested,
       direction:
@@ -3167,7 +3384,7 @@ function validatePolicyChanges(config, changes, context = {}) {
       return result;
     }
 
-    if (!pageIdForPolicyArea(change.area) || !controlNameForPolicyParameter(change.parameter)) {
+    if (!pageIdForPolicyArea(change.area) || !controlNameForPolicyParameter(change.parameter, change.area)) {
       result.reject_reason = "Unsupported policy field.";
       return result;
     }

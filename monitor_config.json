@@ -352,7 +352,7 @@
       "wip_to_demand_ratio_max": 3
     },
     "max_change_per_run": {
-      "order_point": 25,
+      "order_point": 50,
       "quantity": 25
     },
     "bounds": {
@@ -389,9 +389,9 @@
       "block_when_no_latest_state": false
     },
     "allow_shipping_method_change": false,
-    "max_numeric_changes_per_run": 4,
+    "max_numeric_changes_per_run": 8,
     "max_change_per_apply": {
-      "order_point": 25,
+      "order_point": 50,
       "quantity": 25
     },
     "guardrails": {
