@@ -341,6 +341,7 @@
     "enabled": true,
     "mode": "autopilot_recommendations",
     "allow_game_updates": true,
+    "emergency_step_multiplier": 2,
     "targets": {
       "days_of_cover_min": 3,
       "days_of_cover_max": 6,
@@ -388,7 +389,7 @@
       "schedule_minutes": 5,
       "consecutive_confirmations_required": 1,
       "minimum_game_days_between_apply": 1,
-      "emergency_same_day_max_applies": 2,
+      "emergency_same_day_max_applies": 6,
       "emergency_cover_days_max": 2,
       "emergency_network_lost_demand_min": 1,
       "default_enabled_env": "POLICY_AUTOPILOT_ENABLED",
@@ -399,6 +400,10 @@
     "max_change_per_apply": {
       "order_point": 50,
       "quantity": 25
+    },
+    "emergency_max_change_per_apply": {
+      "order_point": 100,
+      "quantity": 50
     },
     "guardrails": {
       "block_priority_changes": true,

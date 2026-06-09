@@ -25,13 +25,16 @@ jobs:
         run: npm ci
 
       - name: Crawl latest data and build workbook
-        run: npm run monitor
+        run: timeout "${MANUAL_EXPORT_COMMAND_TIMEOUT_SECONDS:-420}" npm run monitor
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
           SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
+          SC_FETCH_ATTEMPTS: ${{ vars.SC_FETCH_ATTEMPTS || '5' }}
+          SC_FETCH_TIMEOUT_MS: ${{ vars.SC_FETCH_TIMEOUT_MS || '30000' }}
           EMAIL_ENABLED: "false"
           EMAIL_DRY_RUN: "true"
+          MANUAL_EXPORT_COMMAND_TIMEOUT_SECONDS: ${{ vars.MANUAL_EXPORT_COMMAND_TIMEOUT_SECONDS || '420' }}
 
       - name: Upload latest data workbook
         if: always()

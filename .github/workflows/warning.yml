@@ -32,7 +32,7 @@ jobs:
   warning-monitor:
     if: github.event_name != 'push' || contains(github.event.head_commit.message, '[warning-now]')
     runs-on: ubuntu-latest
-    timeout-minutes: 80
+    timeout-minutes: 120
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -70,7 +70,7 @@ jobs:
 
           for cycle in $(seq 1 "${cycles}"); do
             echo "::group::Sim-day monitor cycle ${cycle}/${cycles}"
-            if npm run warning-email; then
+            if timeout "${WARNING_COMMAND_TIMEOUT_SECONDS:-240}" npm run warning-email; then
               consecutive_failures=0
             else
               rc="$?"
@@ -89,6 +89,8 @@ jobs:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
           SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
+          SC_FETCH_ATTEMPTS: ${{ vars.SC_FETCH_ATTEMPTS || '5' }}
+          SC_FETCH_TIMEOUT_MS: ${{ vars.SC_FETCH_TIMEOUT_MS || '30000' }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
@@ -105,6 +107,7 @@ jobs:
           WECOM_NOTIFY_MODE: "off"
           WARNING_MONITOR_CYCLES: ${{ github.event_name == 'workflow_dispatch' && inputs.continuous == 'false' && '1' || vars.WARNING_MONITOR_CYCLES || '12' }}
           WARNING_MONITOR_INTERVAL_SECONDS: ${{ vars.WARNING_MONITOR_INTERVAL_SECONDS || '300' }}
+          WARNING_COMMAND_TIMEOUT_SECONDS: ${{ vars.WARNING_COMMAND_TIMEOUT_SECONDS || '240' }}
           EMAIL_EVENT_MIN_INTERVAL_MINUTES: ${{ vars.EMAIL_EVENT_MIN_INTERVAL_MINUTES || '55' }}
 
       - name: Save warning state
@@ -153,6 +156,7 @@ jobs:
 
       - name: Upload status page
         if: always()
+        continue-on-error: true
         uses: actions/upload-pages-artifact@v3
         with:
           path: .monitor-state/status-site
@@ -165,12 +169,13 @@ jobs:
 
       - name: Queue next sim-day notification run
         if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.continuous == 'true') && (vars.WARNING_SELF_DISPATCH || 'true') != 'false' }}
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          curl -sS -X POST \
+          curl --fail --silent --show-error --retry 5 --retry-delay 10 --retry-all-errors -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \

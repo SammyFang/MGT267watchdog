@@ -88,12 +88,40 @@ function retryDelayMs(attempt) {
   return Math.min(1500 * 2 ** (attempt - 1), 10000);
 }
 
+function fetchTimeoutMs() {
+  return Math.max(
+    1000,
+    Number.parseInt(optionalEnv("SC_FETCH_TIMEOUT_MS", "30000"), 10) || 30000,
+  );
+}
+
 function isRetryableStatus(status) {
   return [408, 429, 500, 502, 503, 504].includes(status);
 }
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options = {}, label = requestLabel(url)) {
+  const timeoutMs = fetchTimeoutMs();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`${label} timed out after ${timeoutMs}ms`);
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function request(url, options, cookieJar) {
@@ -106,6 +134,9 @@ async function request(url, options, cookieJar) {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const headers = new Headers(options.headers || {});
     const cookies = cookieHeader(cookieJar);
+    const controller = new AbortController();
+    const timeoutMs = fetchTimeoutMs();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     if (cookies) {
       headers.set("cookie", cookies);
@@ -116,7 +147,9 @@ async function request(url, options, cookieJar) {
         ...options,
         headers,
         redirect: "manual",
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
 
       collectCookies(response.headers, cookieJar);
 
@@ -128,14 +161,19 @@ async function request(url, options, cookieJar) {
         `Retrying ${requestLabel(url)} after HTTP ${response.status} (${attempt}/${maxAttempts})`,
       );
     } catch (error) {
+      clearTimeout(timeout);
       lastError = error;
+      const message =
+        error.name === "AbortError"
+          ? `timed out after ${timeoutMs}ms`
+          : error.message;
 
       if (attempt === maxAttempts) {
-        throw error;
+        throw new Error(`${requestLabel(url)} ${message}`);
       }
 
       console.warn(
-        `Retrying ${requestLabel(url)} after fetch error: ${error.message} (${attempt}/${maxAttempts})`,
+        `Retrying ${requestLabel(url)} after fetch error: ${message} (${attempt}/${maxAttempts})`,
       );
     }
 
@@ -184,6 +222,10 @@ function isLoggedIn(html, teamId) {
     html.includes(`Name: <b>${teamId}</b>`) ||
     (html.includes("SCQuit") && html.includes("Supply Chain Game"))
   );
+}
+
+function isSimulatorUnavailable(html) {
+  return /Access to the simulator is currently disabled/i.test(String(html || ""));
 }
 
 function extractDashboardValues(html) {
@@ -2548,6 +2590,7 @@ function buildAutoAdjustmentPlan(
     metricCatalog,
     "derived:cash_lead_percent_vs_nearest",
   );
+  const networkLostDemand = metricValue(metricCatalog, "derived:network_lost_demand");
   const servedRegionCount =
     metricValue(metricCatalog, "derived:calopeia_served_region_count") ?? 1;
   const truckPipeline = metricValue(metricCatalog, "warehouse_inventory:truck");
@@ -2564,6 +2607,16 @@ function buildAutoAdjustmentPlan(
   const lostDemandMax = Number(targets.lost_demand_max ?? 0);
   const shipmentRatioMin = Number(targets.shipment_to_demand_ratio_min ?? 0.9);
   const wipRatioMax = Number(targets.wip_to_demand_ratio_max ?? 3);
+  const emergencyStepMultiplier = Math.max(
+    1,
+    Number(cfg.emergency_step_multiplier ?? 1) || 1,
+  );
+  const emergencyCoverDaysMax = Number(
+    config.policy_apply?.autopilot?.emergency_cover_days_max ?? daysMin,
+  );
+  const emergencyNetworkLostDemandMin = Number(
+    config.policy_apply?.autopilot?.emergency_network_lost_demand_min ?? 1,
+  );
   const orderPointStep = Number(maxChange.order_point ?? 25);
   const quantityStep = Number(maxChange.quantity ?? 25);
   const pointMin = Number(bounds.order_point_min ?? 0);
@@ -2597,6 +2650,13 @@ function buildAutoAdjustmentPlan(
     (Number.isFinite(lostDemand) && lostDemand > lostDemandMax) ||
     (Number.isFinite(daysOfCover) && daysOfCover < daysMin) ||
     record.warehouseInventory <= inventoryLow;
+  const severeShortage =
+    shortageRisk &&
+    ((Number.isFinite(daysOfCover) && daysOfCover <= emergencyCoverDaysMax) ||
+      (Number.isFinite(lostDemand) && lostDemand > lostDemandMax) ||
+      (Number.isFinite(networkLostDemand) &&
+        networkLostDemand >= emergencyNetworkLostDemandMin) ||
+      record.warehouseInventory <= inventoryLow);
   const shipmentBelowDemand =
     Number.isFinite(shipmentRatio) && shipmentRatio < shipmentRatioMin;
   const wipRatio =
@@ -2662,6 +2722,11 @@ function buildAutoAdjustmentPlan(
       confidence: Number.isFinite(current) ? "medium" : "low",
       reason,
     });
+  }
+
+  function policyStep(parameter, emergency = false) {
+    const base = parameter === "quantity" ? quantityStep : orderPointStep;
+    return Math.max(1, Math.round(base * (emergency ? emergencyStepMultiplier : 1)));
   }
 
   function shortageDirection(current, parameter) {
@@ -2749,7 +2814,7 @@ function buildAutoAdjustmentPlan(
       "order_point",
       factory.order_point,
       factoryOrderPointDirection,
-      orderPointStep,
+      policyStep("order_point", severeShortage),
       factoryOrderPointDirection === "hold"
         ? `Shortage risk is timing-driven, but factory order point already exceeds served-demand target; ${inventoryReason}; ${pipelineText}.`
         : `Shortage risk detected and factory order point is below served-demand target; ${inventoryReason}.`,
@@ -2760,7 +2825,7 @@ function buildAutoAdjustmentPlan(
       "quantity",
       factory.quantity,
       factoryQuantityDirection,
-      quantityStep,
+      policyStep("quantity", severeShortage),
       factoryQuantityDirection === "hold"
         ? `Current batch quantity is already large relative to served demand; avoid bullwhip and wait for pipeline unless lost demand persists.`
         : `Raise replenishment cautiously until coverage returns to ${daysMin}-${daysMax} days.`,
@@ -2771,7 +2836,7 @@ function buildAutoAdjustmentPlan(
       "order_point",
       warehouse.order_point,
       warehouseOrderPointDirection,
-      orderPointStep,
+      policyStep("order_point", severeShortage),
       warehouseOrderPointDirection === "hold"
         ? `Warehouse order point already exceeds served-demand target; shortage risk points to timing or inbound pipeline, not a lower trigger point.`
         : `Warehouse coverage is below target or lost demand is present; ${inventoryReason}.`,
@@ -2782,7 +2847,7 @@ function buildAutoAdjustmentPlan(
       "quantity",
       warehouse.quantity,
       warehouseQuantityDirection,
-      quantityStep,
+      policyStep("quantity", severeShortage),
       warehouseQuantityDirection === "hold"
         ? `Keep warehouse quantity steady to avoid over-correction while inbound inventory catches up.`
         : "Increase outbound replenishment planning only after confirming inventory is available.",
@@ -2964,6 +3029,11 @@ function buildAutoAdjustmentPlan(
       (Number.isFinite(regionLostDemand) && regionLostDemand > lostDemandMax) ||
       (Number.isFinite(regionCover) && regionCover < daysMin) ||
       (Number.isFinite(regionInventory) && regionInventory <= inventoryLow);
+    const regionSevereShortage =
+      regionShortageRisk &&
+      ((Number.isFinite(regionCover) && regionCover <= emergencyCoverDaysMax) ||
+        (Number.isFinite(regionLostDemand) && regionLostDemand > lostDemandMax) ||
+        (Number.isFinite(regionInventory) && regionInventory <= inventoryLow));
     const regionReason = [
       `${regionConfig.region} inventory ${Number.isFinite(regionInventory) ? formatMetricNumber(regionInventory) : "n/a"}`,
       Number.isFinite(regionCover)
@@ -2994,7 +3064,7 @@ function buildAutoAdjustmentPlan(
           "order_point",
           factoryPolicy.order_point,
           "increase",
-          orderPointStep,
+          policyStep("order_point", regionSevereShortage),
           `${regionConfig.region} shortage risk detected; ${regionReason}.`,
           regionTargetOrderPoint,
         );
@@ -3009,7 +3079,7 @@ function buildAutoAdjustmentPlan(
           "order_point",
           warehousePolicy.order_point,
           "increase",
-          orderPointStep,
+          policyStep("order_point", regionSevereShortage),
           `${regionConfig.region} warehouse reorder point is below lead-time demand; ${regionReason}.`,
           regionTargetOrderPoint,
         );
@@ -3024,7 +3094,7 @@ function buildAutoAdjustmentPlan(
           "quantity",
           factoryPolicy.quantity,
           "increase",
-          quantityStep,
+          policyStep("quantity", regionSevereShortage),
           `${regionConfig.region} batch quantity is below the demand target; ${regionReason}.`,
           regionTargetQuantity,
         );
@@ -3039,7 +3109,7 @@ function buildAutoAdjustmentPlan(
           "quantity",
           warehousePolicy.quantity,
           "increase",
-          quantityStep,
+          policyStep("quantity", regionSevereShortage),
           `${regionConfig.region} warehouse quantity is below the demand target; ${regionReason}.`,
           regionTargetQuantity,
         );
@@ -3096,6 +3166,7 @@ function buildAutoAdjustmentPlan(
       demand,
       shipments,
       lost_demand: lostDemand,
+      network_lost_demand: networkLostDemand,
       lost_demand_rate: lostDemandRate,
       factory_wip: wip,
       days_of_cover: daysOfCover,
@@ -3104,6 +3175,7 @@ function buildAutoAdjustmentPlan(
       target_inventory: targetOrderPoint,
       target_order_point: targetOrderPoint,
       target_quantity: targetQuantity,
+      emergency_step_multiplier: emergencyStepMultiplier,
       replenishment_lead_days: replenishmentLeadDays,
       production_lead_days: productionDays,
       transport_lead_days: transportDays,
@@ -3545,15 +3617,31 @@ function validatePolicyChanges(config, changes, context = {}) {
     ...(config.auto_adjust?.max_change_per_run || {}),
     ...(cfg.max_change_per_apply || {}),
   };
+  const emergencyMaxChange = cfg.emergency_max_change_per_apply || {};
   const bounds = config.auto_adjust?.bounds || {};
   const metricCatalog = context.metricCatalog;
   const record = context.record;
   const coverTargets = coverageTargets(config, record);
   const rules = gameRules(config);
+  const autopilot = cfg.autopilot || {};
   const lostDemand =
     metricValue(metricCatalog, "derived:calopeia_served_lost_demand") ??
     metricValue(metricCatalog, "hq_lost_demand:Calopeia");
+  const networkLostDemand =
+    metricValue(metricCatalog, "derived:network_lost_demand") ??
+    metricValue(metricCatalog, "derived:calopeia_served_lost_demand") ??
+    metricValue(metricCatalog, "hq_lost_demand:Calopeia");
   const daysOfCover = metricValue(metricCatalog, "derived:days_of_cover");
+  const emergencyStepMultiplier = Math.max(
+    1,
+    Number(config.auto_adjust?.emergency_step_multiplier ?? 1) || 1,
+  );
+  const emergencyCoverDaysMax = Number(
+    autopilot.emergency_cover_days_max ?? coverTargets.min,
+  );
+  const emergencyNetworkLostDemandMin = Number(
+    autopilot.emergency_network_lost_demand_min ?? 1,
+  );
   const allowShipping = context.allowShipping === true;
   let acceptedNumeric = 0;
 
@@ -3624,7 +3712,20 @@ function validatePolicyChanges(config, changes, context = {}) {
       return result;
     }
 
-    const fieldMaxChange = Number(maxChange[change.parameter] ?? 25);
+    const emergencyShortage =
+      delta > 0 &&
+      ((Number.isFinite(daysOfCover) && daysOfCover <= emergencyCoverDaysMax) ||
+        (Number.isFinite(lostDemand) && lostDemand > 0) ||
+        (Number.isFinite(networkLostDemand) &&
+          networkLostDemand >= emergencyNetworkLostDemandMin));
+    const fieldMaxChangeBase = Number(maxChange[change.parameter] ?? 25);
+    const fieldMaxChange = emergencyShortage
+      ? Number(
+          emergencyMaxChange[change.parameter] ??
+            fieldMaxChangeBase * emergencyStepMultiplier,
+        )
+      : fieldMaxChangeBase;
+
     if (Math.abs(delta) > fieldMaxChange) {
       result.reject_reason = `Change ${delta} exceeds per-apply limit +/-${fieldMaxChange}.`;
       return result;
@@ -5346,14 +5447,18 @@ async function sendWecomNotification(config, record, standingReport, options = {
   }
 
   const content = buildWecomMarkdown(config, record, standingReport, options);
-  const response = await fetch(webhook, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      msgtype: "markdown",
-      markdown: { content },
-    }),
-  });
+  const response = await fetchWithTimeout(
+    webhook,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        msgtype: "markdown",
+        markdown: { content },
+      }),
+    },
+    "WeCom webhook",
+  );
   const text = await response.text();
 
   if (!response.ok) {
@@ -5392,17 +5497,21 @@ async function githubApi(config, method, endpoint, body) {
     return null;
   }
 
-  const response = await fetch(`https://api.github.com/repos/${repository}${endpoint}`, {
-    method,
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      "User-Agent": "mgt267-watchdog",
-      "X-GitHub-Api-Version": "2022-11-28",
+  const response = await fetchWithTimeout(
+    `https://api.github.com/repos/${repository}${endpoint}`,
+    {
+      method,
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "User-Agent": "mgt267-watchdog",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      body: body ? JSON.stringify(body) : undefined,
     },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+    `GitHub API ${method} ${endpoint}`,
+  );
 
   if (!response.ok) {
     const text = await response.text();
@@ -7666,6 +7775,10 @@ async function loginToGame(config) {
   const dashboardHtml = await loginResponse.text();
 
   if (!loginResponse.ok || !isLoggedIn(dashboardHtml, teamId)) {
+    if (isSimulatorUnavailable(dashboardHtml)) {
+      throw new Error("Simulator access is currently disabled; skipping this cycle until the official site re-enables access.");
+    }
+
     throw new Error(`Login failed with HTTP ${loginResponse.status}`);
   }
 
@@ -8660,6 +8773,12 @@ async function main() {
 }
 
 main().catch((error) => {
+  if (/Simulator access is currently disabled/i.test(error.message || "")) {
+    console.log(error.message);
+    process.exitCode = 0;
+    return;
+  }
+
   console.error(error.stack || error.message);
   process.exitCode = 1;
 });

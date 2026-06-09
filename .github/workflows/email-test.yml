@@ -29,11 +29,13 @@ jobs:
         run: npm ci
 
       - name: Send test emails
-        run: npm run test-email
+        run: timeout "${EMAIL_TEST_COMMAND_TIMEOUT_SECONDS:-300}" npm run test-email
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
           SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
+          SC_FETCH_ATTEMPTS: ${{ vars.SC_FETCH_ATTEMPTS || '5' }}
+          SC_FETCH_TIMEOUT_MS: ${{ vars.SC_FETCH_TIMEOUT_MS || '30000' }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
@@ -42,6 +44,7 @@ jobs:
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           EMAIL_ENABLED: ${{ vars.EMAIL_ENABLED || 'false' }}
+          EMAIL_TEST_COMMAND_TIMEOUT_SECONDS: ${{ vars.EMAIL_TEST_COMMAND_TIMEOUT_SECONDS || '300' }}
 
       - name: Upload email output
         if: always()

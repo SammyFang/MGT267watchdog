@@ -22,7 +22,7 @@ jobs:
   monitor:
     if: github.event_name != 'push' || contains(github.event.head_commit.message, '[hourly-now]')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -49,11 +49,35 @@ jobs:
             monitor-state-
 
       - name: Run watchdog
-        run: npm run monitor
+        run: |
+          set -euo pipefail
+
+          attempts="${MONITOR_COMMAND_ATTEMPTS:-3}"
+          timeout_seconds="${MONITOR_COMMAND_TIMEOUT_SECONDS:-420}"
+          last_rc=0
+
+          for attempt in $(seq 1 "${attempts}"); do
+            echo "::group::Watchdog attempt ${attempt}/${attempts}"
+            if timeout "${timeout_seconds}" npm run monitor; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            last_rc="$?"
+            echo "::warning::Watchdog attempt ${attempt}/${attempts} failed with exit code ${last_rc}."
+            echo "::endgroup::"
+
+            if [ "${attempt}" -lt "${attempts}" ]; then
+              sleep $((attempt * 30))
+            fi
+          done
+
+          exit "${last_rc}"
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
           SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
+          SC_FETCH_ATTEMPTS: ${{ vars.SC_FETCH_ATTEMPTS || '5' }}
+          SC_FETCH_TIMEOUT_MS: ${{ vars.SC_FETCH_TIMEOUT_MS || '30000' }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
@@ -69,6 +93,8 @@ jobs:
           WECOM_WEBHOOK_URL: ""
           WECOM_ENABLED: "false"
           WECOM_NOTIFY_MODE: "off"
+          MONITOR_COMMAND_ATTEMPTS: ${{ vars.MONITOR_COMMAND_ATTEMPTS || '3' }}
+          MONITOR_COMMAND_TIMEOUT_SECONDS: ${{ vars.MONITOR_COMMAND_TIMEOUT_SECONDS || '420' }}
 
       - name: Save monitor state
         if: always()
@@ -116,6 +142,7 @@ jobs:
 
       - name: Upload status page
         if: always()
+        continue-on-error: true
         uses: actions/upload-pages-artifact@v3
         with:
           path: .monitor-state/status-site

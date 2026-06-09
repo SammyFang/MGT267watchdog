@@ -67,16 +67,19 @@ jobs:
         run: npm ci
 
       - name: Validate and apply approved policy changes
-        run: npm run apply-policy
+        run: timeout "${APPLY_POLICY_COMMAND_TIMEOUT_SECONDS:-300}" npm run apply-policy
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
           SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
+          SC_FETCH_ATTEMPTS: ${{ vars.SC_FETCH_ATTEMPTS || '5' }}
+          SC_FETCH_TIMEOUT_MS: ${{ vars.SC_FETCH_TIMEOUT_MS || '30000' }}
           POLICY_APPLY_CONFIRM: ${{ inputs.confirm }}
           POLICY_APPLY_MODE: ${{ inputs.apply_mode }}
           POLICY_APPLY_DRY_RUN: ${{ inputs.dry_run }}
           POLICY_CUSTOM_JSON: ${{ inputs.custom_json }}
           POLICY_ALLOW_SHIPPING_METHOD_CHANGE: ${{ inputs.allow_shipping_method_change }}
+          APPLY_POLICY_COMMAND_TIMEOUT_SECONDS: ${{ vars.APPLY_POLICY_COMMAND_TIMEOUT_SECONDS || '300' }}
 
       - name: Upload apply output
         if: always()

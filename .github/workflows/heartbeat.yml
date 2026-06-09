@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   heartbeat:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[heartbeat-now]'))
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'repository_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[heartbeat-now]'))
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -48,11 +48,13 @@ jobs:
 
       - name: Check warning rules
         continue-on-error: true
-        run: npm run warning-email
+        run: timeout "${HEARTBEAT_COMMAND_TIMEOUT_SECONDS:-240}" npm run warning-email
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
           SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
+          SC_FETCH_ATTEMPTS: ${{ vars.SC_FETCH_ATTEMPTS || '5' }}
+          SC_FETCH_TIMEOUT_MS: ${{ vars.SC_FETCH_TIMEOUT_MS || '30000' }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
@@ -63,15 +65,18 @@ jobs:
           EMAIL_ENABLED: ${{ vars.EMAIL_ENABLED || 'false' }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_ISSUE_NOTIFICATIONS: "true"
+          HEARTBEAT_COMMAND_TIMEOUT_SECONDS: ${{ vars.HEARTBEAT_COMMAND_TIMEOUT_SECONDS || '240' }}
 
       - name: Run hourly report throttle
         if: ${{ !cancelled() }}
         continue-on-error: true
-        run: npm run monitor
+        run: timeout "${HEARTBEAT_COMMAND_TIMEOUT_SECONDS:-240}" npm run monitor
         env:
           SC_TEAM_ID: ${{ secrets.SC_TEAM_ID }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
           SC_INSTITUTION: ${{ secrets.SC_INSTITUTION }}
+          SC_FETCH_ATTEMPTS: ${{ vars.SC_FETCH_ATTEMPTS || '5' }}
+          SC_FETCH_TIMEOUT_MS: ${{ vars.SC_FETCH_TIMEOUT_MS || '30000' }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
@@ -82,6 +87,7 @@ jobs:
           EMAIL_ENABLED: ${{ vars.EMAIL_ENABLED || 'false' }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_ISSUE_NOTIFICATIONS: "true"
+          HEARTBEAT_COMMAND_TIMEOUT_SECONDS: ${{ vars.HEARTBEAT_COMMAND_TIMEOUT_SECONDS || '240' }}
 
       - name: Save heartbeat state
         if: always()
